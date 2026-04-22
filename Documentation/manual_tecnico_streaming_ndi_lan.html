@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manual Técnico Completo - Streaming NDI LAN</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #4b5563;
+      --accent: #0b5c8c;
+      --accent2: #0c7a5f;
+      --line: #d7dee8;
+      --warn: #8a3b12;
+      --codebg: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.55;
+      background:
+        radial-gradient(circle at 10% 10%, #e6f4ff 0%, transparent 45%),
+        radial-gradient(circle at 90% 0%, #e8fff5 0%, transparent 30%),
+        var(--bg);
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 24px auto 48px;
+      padding: 0 16px;
+    }
+    .hero {
+      background: linear-gradient(120deg, #0b5c8c, #0c7a5f);
+      color: #fff;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(11, 92, 140, .25);
+      margin-bottom: 18px;
+    }
+    .hero h1 { margin: 0 0 8px; font-size: 2rem; }
+    .hero p { margin: 6px 0; opacity: .95; }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .pill {
+      border: 1px solid rgba(255,255,255,.35);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: .85rem;
+      background: rgba(255,255,255,.12);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 14px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .05);
+    }
+    h2 { margin: 0 0 10px; font-size: 1.35rem; color: var(--accent); }
+    h3 { margin: 16px 0 8px; font-size: 1.05rem; color: #12425e; }
+    p { margin: 8px 0; }
+    ul, ol { margin: 8px 0 8px 18px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--codebg);
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-size: .92em;
+    }
+    pre {
+      background: #0f172a;
+      color: #d1fae5;
+      border-radius: 10px;
+      padding: 12px;
+      overflow: auto;
+      border: 1px solid #1e293b;
+      font-size: .9rem;
+    }
+    .two {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }
+    .warn {
+      border: 1px solid #f5c097;
+      background: #fff9f5;
+      color: var(--warn);
+      border-radius: 10px;
+      padding: 10px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: .95rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f9fafb; color: #0f4d74; }
+    .small { color: var(--muted); font-size: .92rem; }
+    .badge-ok {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #86efac;
+      background: #f0fdf4;
+      color: #166534;
+      font-size: .8rem;
+      margin-right: 6px;
+    }
+    .badge-info {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid #bfdbfe;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: .8rem;
+      margin-right: 6px;
+    }
+    .footer {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: .9rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Manual Técnico Completo · Streaming NDI LAN</h1>
+      <p>Guía integral del emisor NDI por red local: arquitectura, flujo interno, decisiones de diseño, operación, diagnóstico y extensión.</p>
+      <div class="meta">
+        <span class="pill">Proyecto: Py_NDI</span>
+        <span class="pill">Enfoque: streaming NDI LAN</span>
+        <span class="pill">Última actualización: 2026-04-21</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>1. Resumen Ejecutivo</h2>
+      <p>El proyecto publica una señal NDI a partir de un archivo de vídeo local, con audio sincronizado y modo dual opcional para validación visual (señal secundaria con overlay).</p>
+      <p>
+        <span class="badge-ok">Estado: operativo</span>
+        <span class="badge-info">Video + audio</span>
+        <span class="badge-info">Modo dual opcional</span>
+        <span class="badge-info">Pacing monotónico</span>
+      </p>
+      <ul>
+        <li><strong>Punto de entrada:</strong> <code>stream_video.py</code>.</li>
+        <li><strong>Módulo auxiliar:</strong> <code>utils.py</code>.</li>
+        <li><strong>Dependencias Python:</strong> <code>cyndilib</code> y <code>numpy</code>.</li>
+        <li><strong>Herramientas externas:</strong> <code>ffmpeg</code> y <code>ffprobe</code>.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>2. Estructura y Componentes</h2>
+      <table>
+        <thead>
+          <tr><th>Ruta</th><th>Rol</th><th>Notas</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>stream_video.py</code></td>
+            <td>Orquestación completa: metadata, decode A/V, envío NDI y pacing.</td>
+            <td>Contiene manejo de errores y reinicio de decoder.</td>
+          </tr>
+          <tr>
+            <td><code>utils.py</code></td>
+            <td>Creación de sender NDI y overlay animado.</td>
+            <td>Encapsula configuración de <code>VideoSendFrame</code>.</td>
+          </tr>
+          <tr>
+            <td><code>requirements.txt</code></td>
+            <td>Dependencias de entorno Python.</td>
+            <td>Mínimo necesario para runtime.</td>
+          </tr>
+          <tr>
+            <td><code>Videos/</code></td>
+            <td>Activos de prueba/reproducción.</td>
+            <td>Ruta por defecto del script.</td>
+          </tr>
+          <tr>
+            <td><code>Documentation/</code></td>
+            <td>Manuales técnicos en varios formatos.</td>
+            <td>HTML ES/EN + Markdown ES.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>3. Stack Técnico</h2>
+      <table>
+        <thead>
+          <tr><th>Componente</th><th>Uso real</th><th>Motivo</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>cyndilib</code></td>
+            <td><code>Sender</code>, <code>VideoSendFrame</code>, <code>AudioSendFrame</code>.</td>
+            <td>API orientada a envío NDI con soporte coherente de vídeo+audio.</td>
+          </tr>
+          <tr>
+            <td><code>numpy</code></td>
+            <td>Construcción/manipulación de buffers de frame y audio.</td>
+            <td>Rendimiento y control de memoria.</td>
+          </tr>
+          <tr>
+            <td><code>ffprobe</code></td>
+            <td>Lectura de resolución, fps y número de frames.</td>
+            <td>Metadata fiable antes de iniciar pipeline.</td>
+          </tr>
+          <tr>
+            <td><code>ffmpeg</code></td>
+            <td>Decode de vídeo BGRA por pipe y audio float32.</td>
+            <td>Compatibilidad de codecs y estabilidad.</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="warn">
+        <strong>Diseño intencional:</strong> el pipeline evita <code>cv2</code> para prevenir conflictos nativos de librerías multimedia en macOS con ciertos drivers NDI.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. Arquitectura del Pipeline</h2>
+      <pre>
+CLI -> parse args -> ffprobe metadata -> sender config (NDI)
+    -> ffmpeg video raw BGRA pipe + ffmpeg audio f32le
+    -> bucle:
+         frame BGRA
+         bloque audio (channels,samples)
+         write_video_and_audio()
+         pacing monotónico
+      </pre>
+      <h3>Contratos de datos</h3>
+      <ul>
+        <li><strong>Video:</strong> formato <code>BGRA</code>, 8 bits por canal, buffer lineal.</li>
+        <li><strong>Frame bytes:</strong> <code>width * height * 4</code>.</li>
+        <li><strong>Audio:</strong> <code>float32</code>, shape <code>(channels, samples)</code>.</li>
+        <li><strong>Sample rate:</strong> 48 kHz, 2 canales.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>5. Flujo de Ejecución Paso a Paso</h2>
+      <ol>
+        <li>Se parsean argumentos y se selecciona vídeo de entrada (por defecto en <code>Videos/</code>).</li>
+        <li>Se consulta metadata con <code>ffprobe</code> para ancho, alto, fps y frames.</li>
+        <li>Se crea y configura el sender NDI principal.</li>
+        <li>Se calcula bloque de audio por frame según fps declarado.</li>
+        <li>Se decodifica audio completo a memoria para acceso determinista.</li>
+        <li>Se arranca decoder de vídeo por pipe en formato <code>rawvideo</code> BGRA.</li>
+        <li>En cada frame se lee vídeo, se toma bloque de audio y se envía.</li>
+        <li>Si el pipe falla, se reinicia decoder y se resincroniza cursor de audio.</li>
+        <li>Un reloj monotónico acumulativo controla el pacing.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>6. Análisis por Función (stream_video.py)</h2>
+      <table>
+        <thead>
+          <tr><th>Función</th><th>Líneas</th><th>Responsabilidad</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>_parse_fps</code></td><td>26-33</td><td>Normaliza fps y aplica fallback seguro.</td></tr>
+          <tr><td><code>_probe_video</code></td><td>35-90</td><td>Consulta metadata de vídeo vía <code>ffprobe</code>.</td></tr>
+          <tr><td><code>_start_video_decoder</code></td><td>92-115</td><td>Lanza <code>ffmpeg</code> en modo loop infinito y output BGRA.</td></tr>
+          <tr><td><code>_read_exact</code></td><td>117-128</td><td>Lectura bloqueante exacta de bytes por frame.</td></tr>
+          <tr><td><code>_decode_audio_to_array</code></td><td>130-175</td><td>Decodifica audio completo a <code>float32</code> planar.</td></tr>
+          <tr><td><code>stream_video</code></td><td>177-331</td><td>Orquesta setup, bucle, envío A/V, modo dual y cleanup.</td></tr>
+          <tr><td>Bloque main</td><td>334-340</td><td>Entry point CLI y vídeo por defecto.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>7. Análisis por Función (utils.py)</h2>
+      <table>
+        <thead>
+          <tr><th>Función</th><th>Líneas</th><th>Responsabilidad</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>_pixelate_roi</code></td><td>10-16</td><td>Pixelado simple por submuestreo + repetición.</td></tr>
+          <tr><td><code>draw_square</code></td><td>19-43</td><td>Overlay animado con trayectoria sinusoidal y borde.</td></tr>
+          <tr><td><code>make_sender</code></td><td>46-57</td><td>Configura sender NDI con FourCC BGRA y clocks desactivados.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>8. Temporización y Sincronización</h2>
+      <h3>8.1 Pacing de vídeo</h3>
+      <ul>
+        <li>Se usa <code>next_frame_time += frame_duration</code> para scheduling acumulativo.</li>
+        <li>Si el loop va tarde, se re-sincroniza con <code>now</code> para no arrastrar drift indefinido.</li>
+      </ul>
+      <h3>8.2 Relación audio/frame</h3>
+      <ul>
+        <li><code>audio_samples_per_frame = round(sample_rate / fps)</code>.</li>
+        <li>Si la relación es fraccional, se emite warning y se prioriza bloque fijo para estabilidad.</li>
+      </ul>
+      <h3>8.3 Integridad de buffer</h3>
+      <ul>
+        <li>Se usa <code>np.frombuffer(...).copy()</code> para garantizar memoria escribible en envío NDI.</li>
+        <li>Evita el error: <code>ValueError: buffer source array is read-only</code>.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>9. Modo Dual</h2>
+      <p>Con <code>--dual</code> se crea una segunda fuente NDI con el sufijo <code>-Square</code>.</p>
+      <ul>
+        <li>La señal principal mantiene vídeo limpio.</li>
+        <li>La secundaria aplica overlay animado por frame.</li>
+        <li>Ambas pueden compartir el mismo bloque de audio por frame.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>10. Ejecución y Operativa</h2>
+      <h3>10.1 Instalación</h3>
+      <pre>cd &lt;project-root&gt;
+python3 -m pip install -r requirements.txt</pre>
+      <h3>10.2 Ejecución</h3>
+      <pre>python3 ./stream_video.py
+python3 ./stream_video.py Videos/alhaja.mp4
+python3 ./stream_video.py Videos/alhaja.mp4 --dual</pre>
+      <h3>10.3 Verificación rápida</h3>
+      <ol>
+        <li>Abrir NDI Monitor o receptor compatible.</li>
+        <li>Confirmar visibilidad de fuente principal.</li>
+        <li>En dual, confirmar fuente secundaria con overlay.</li>
+        <li>Comprobar audio en ambas fuentes si el archivo lo contiene.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>11. Troubleshooting Avanzado</h2>
+      <table>
+        <thead>
+          <tr><th>Síntoma</th><th>Causa probable</th><th>Acción recomendada</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>No hay salida NDI</td>
+            <td>Runtime NDI no operativo o red fuera de alcance.</td>
+            <td>Verificar instalación runtime y segmento LAN compartido.</td>
+          </tr>
+          <tr>
+            <td>No hay audio</td>
+            <td>ffmpeg ausente o archivo sin pista de audio.</td>
+            <td>Instalar ffmpeg y validar pista con ffprobe.</td>
+          </tr>
+          <tr>
+            <td>Jitter o stutter</td>
+            <td>Sobrecarga CPU, overruns de timing o archivo muy pesado.</td>
+            <td>Reducir resolución/fps del asset y validar carga del host.</td>
+          </tr>
+          <tr>
+            <td>Error read-only buffer</td>
+            <td>Frame generado desde bytes no escribibles.</td>
+            <td>Usar copia writable antes de envío (ya integrado).</td>
+          </tr>
+          <tr>
+            <td>Fallos intermitentes de frame</td>
+            <td>Pipe de decoder cerrado inesperadamente.</td>
+            <td>El script reinicia decoder automáticamente y continúa.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>12. Rendimiento y Escalabilidad</h2>
+      <ul>
+        <li>La ruta crítica está dominada por decode + envío NDI por frame.</li>
+        <li>Duplicar señal (modo dual) incrementa coste por copia/overlay/envío.</li>
+        <li>Para estabilidad en hosts limitados, priorizar assets con bitrate/fps moderado.</li>
+      </ul>
+      <h3>Recomendaciones</h3>
+      <ul>
+        <li>Usar archivos con fps consistente (p.ej. 50 o 60 estables).</li>
+        <li>Mantener software de NDI y sistema actualizados.</li>
+        <li>Monitorizar warnings de timing en consola durante sesiones largas.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>13. Guía de Extensión</h2>
+      <ol>
+        <li>Para nuevos overlays, ampliar <code>draw_square()</code> o crear nuevas funciones en <code>utils.py</code>.</li>
+        <li>Para nuevos modos de salida, extender parseo CLI en el bloque <code>__main__</code>.</li>
+        <li>Para telemetría, añadir métricas de loop y emitirse cada N frames.</li>
+        <li>Para múltiples fuentes, instanciar varios senders con clocks equivalentes.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>14. Referencias de Código Clave</h2>
+      <table>
+        <thead>
+          <tr><th>Archivo</th><th>Líneas</th><th>Punto clave</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>stream_video.py</code></td><td>35-90</td><td>Metadata robusta con ffprobe.</td></tr>
+          <tr><td><code>stream_video.py</code></td><td>130-175</td><td>Decode de audio a formato interno NDI.</td></tr>
+          <tr><td><code>stream_video.py</code></td><td>248-331</td><td>Bucle principal, envío y control de fallos.</td></tr>
+          <tr><td><code>stream_video.py</code></td><td>271-273</td><td>Corrección writable buffer para cyndilib.</td></tr>
+          <tr><td><code>utils.py</code></td><td>46-57</td><td>Configuración de sender y video frame.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>15. Checklist de Validación</h2>
+      <ol>
+        <li>Instalación de dependencias Python completada.</li>
+        <li><code>ffmpeg</code> y <code>ffprobe</code> accesibles en PATH.</li>
+        <li>Ejecución sin excepciones en modo normal.</li>
+        <li>Ejecución estable en modo <code>--dual</code>.</li>
+        <li>Audio y vídeo visibles en receptor NDI.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>16. Conclusión Técnica</h2>
+      <p>La implementación actual ofrece un pipeline NDI LAN sólido, legible y mantenible, con sincronización práctica entre vídeo y audio y mecanismos de recuperación frente a cortes del decoder.</p>
+      <p>La documentación está pensada para que cualquier persona pueda entender el sistema, operarlo y ampliarlo con bajo riesgo.</p>
+    </section>
+
+
+
+    <section class="card">
+      <h2>17. Decisión de Arquitectura: Migración a FFmpeg</h2>
+      <h3>Contexto técnico</h3>
+      <ul>
+        <li>La implementación original era funcional, pero en determinados entornos macOS apareció un conflicto de librerías nativas cargadas en el mismo proceso.</li>
+        <li>OpenCV cargaba una variante de <code>libavdevice</code> y el stack NDI HX cargaba otra variante con clases Objective-C duplicadas.</li>
+        <li>Ese escenario podía producir errores de casting espurios, comportamiento no determinista y riesgo de crash.</li>
+      </ul>
+      <h3>Decisión tomada</h3>
+      <ul>
+        <li>Eliminar OpenCV del camino de runtime del streamer.</li>
+        <li>Migrar probing/decoding a <code>ffprobe</code>/<code>ffmpeg</code>.</li>
+        <li>Mantener el procesamiento de frame y overlay en <code>numpy</code>.</li>
+      </ul>
+      <h3>Beneficios obtenidos</h3>
+      <ul>
+        <li>Eliminación de la causa raíz del conflicto nativo en el proceso de emisión.</li>
+        <li>Pipeline más predecible para integración inter-organizacional.</li>
+        <li>Compatibilidad mantenida con flujos basados en <code>np.ndarray</code>, incluyendo etapas posteriores de procesamiento.</li>
+        <li>Rendimiento de decode en línea con los objetivos del proyecto (normalmente comparable o mejor, según host y carga).</li>
+      </ul>
+      <h3>Alcance de validación</h3>
+      <p>La solución ha sido testada en macOS y Apple Vision Pro.</p>
+    </section>
+
+    <p class="footer">Manual técnico · Streaming NDI LAN</p>
+  </div>
+</body>
+</html>

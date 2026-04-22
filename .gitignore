@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 .idea/
 *.mp4
+*.md
+.DS_Store
