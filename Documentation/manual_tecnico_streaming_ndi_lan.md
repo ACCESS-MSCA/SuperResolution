@@ -182,3 +182,29 @@ Recomendaciones:
 ## 16. Conclusión Técnica
 
 La implementación actual ofrece un pipeline NDI LAN estable y mantenible, con sincronización práctica de vídeo/audio y recuperación automática ante cortes del decoder. Esta documentación permite operar, depurar y extender el sistema con bajo riesgo.
+
+
+## 17. Decisión de Arquitectura: Migración a FFmpeg
+
+### Contexto técnico
+
+- La implementación original era funcional, pero en ciertos entornos macOS apareció un conflicto de librerías nativas en el mismo proceso.
+- OpenCV cargaba una variante de `libavdevice` y el stack NDI HX cargaba otra variante con clases Objective-C duplicadas.
+- Este escenario podía provocar errores de casting espurios, comportamiento no determinista y riesgo de crash.
+
+### Decisión tomada
+
+- Eliminar OpenCV del camino de runtime del streamer.
+- Migrar probing y decode a `ffprobe`/`ffmpeg`.
+- Mantener procesamiento de frame/overlay con `numpy`.
+
+### Beneficios
+
+- Eliminación de la causa raíz del conflicto nativo.
+- Pipeline más predecible para integración inter-organizacional.
+- Compatibilidad mantenida con flujos basados en `np.ndarray`.
+- Rendimiento de decode alineado con objetivos del proyecto (normalmente comparable o mejor según host/carga).
+
+### Alcance de validación
+
+La solución ha sido testada en macOS y Apple Vision Pro.

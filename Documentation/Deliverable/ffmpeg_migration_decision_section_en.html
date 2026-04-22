@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Architecture Decision: FFmpeg Migration</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #4b5563;
+      --accent: #0b5c8c;
+      --line: #d7dee8;
+      --codebg: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+    .wrap {
+      max-width: 920px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .05);
+    }
+    h1 { margin: 0 0 12px; color: var(--accent); }
+    h2 { margin: 16px 0 8px; color: #12425e; font-size: 1.08rem; }
+    ul { margin: 8px 0 8px 18px; }
+    code {
+      background: var(--codebg);
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+    .note { color: var(--muted); margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Architecture Decision: FFmpeg Migration</h1>
+
+      <h2>Technical context</h2>
+      <ul>
+        <li>The original implementation was functional, but specific macOS environments exposed a native-library conflict within the same process.</li>
+        <li>OpenCV loaded one <code>libavdevice</code> variant while the NDI HX stack loaded another variant with overlapping Objective-C classes.</li>
+        <li>This condition could lead to spurious casting failures, non-deterministic behavior, and crash risk.</li>
+      </ul>
+
+      <h2>Decision taken</h2>
+      <ul>
+        <li>Remove OpenCV from the runtime streamer path.</li>
+        <li>Use <code>ffprobe</code>/<code>ffmpeg</code> for probing and decoding.</li>
+        <li>Keep frame and overlay processing in <code>numpy</code>.</li>
+      </ul>
+
+      <h2>Benefits</h2>
+      <ul>
+        <li>Removal of the native conflict root cause.</li>
+        <li>More predictable behavior for cross-organization integration.</li>
+        <li>Preserved compatibility with <code>np.ndarray</code>-based downstream processing.</li>
+        <li>Decode performance aligned with project targets (typically comparable or better, depending on host/load).</li>
+      </ul>
+
+      <h2>Validation scope</h2>
+      <p>The solution has been tested on macOS and Apple Vision Pro.</p>
+    </section>
+  </div>
+</body>
+</html>

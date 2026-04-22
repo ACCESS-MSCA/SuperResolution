@@ -355,6 +355,33 @@ python3 ./stream_video.py Videos/alhaja.mp4 --dual</pre>
       <p>This manual is intentionally detailed so any engineer can operate, debug, and extend the system confidently.</p>
     </section>
 
+
+
+    <section class="card">
+      <h2>17. Architecture Decision: FFmpeg Migration</h2>
+      <h3>Technical context</h3>
+      <ul>
+        <li>The original implementation was functional, but specific macOS environments exposed a native-library conflict inside the same process.</li>
+        <li>OpenCV loaded one <code>libavdevice</code> variant while the NDI HX stack loaded another variant with overlapping Objective-C classes.</li>
+        <li>That condition could trigger spurious casting failures, non-deterministic behavior, and crash risk.</li>
+      </ul>
+      <h3>Decision taken</h3>
+      <ul>
+        <li>Remove OpenCV from the runtime streamer path.</li>
+        <li>Use <code>ffprobe</code>/<code>ffmpeg</code> for probing and decoding.</li>
+        <li>Keep frame/overlay operations in <code>numpy</code>.</li>
+      </ul>
+      <h3>Benefits obtained</h3>
+      <ul>
+        <li>Removal of the native conflict root cause in the sender process.</li>
+        <li>More predictable behavior for cross-organization integration.</li>
+        <li>Preserved compatibility with <code>np.ndarray</code>-based downstream processing.</li>
+        <li>Decode performance aligned with project targets (typically comparable or better, depending on host/load).</li>
+      </ul>
+      <h3>Validation scope</h3>
+      <p>The solution has been tested on macOS and Apple Vision Pro.</p>
+    </section>
+
     <p class="footer">Technical Manual · NDI LAN Streaming</p>
   </div>
 </body>
