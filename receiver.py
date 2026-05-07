@@ -8,41 +8,34 @@ from PyQt5.QtWidgets import (
     QMainWindow, QPushButton, QVBoxLayout, QWidget,
 )
 
+from cyndilib import VideoFrameSync
 from cyndilib.finder import Finder
-from cyndilib.receiver import Receiver, ReceiveFrameType
-from cyndilib.video_frame import VideoRecvFrame
+from cyndilib.receiver import Receiver
 from cyndilib.wrapper.ndi_recv import RecvColorFormat
 
 
 class ReceiveThread(QThread):
     frame_ready = pyqtSignal(np.ndarray, int, int)
 
-    def __init__(self, receiver: Receiver, vf: VideoRecvFrame):
+    def __init__(self, receiver: Receiver):
         super().__init__()
         self._receiver = receiver
-        self._vf = vf
-        self._buf: np.ndarray | None = None
         self._running = True
 
     def run(self):
+        vf = VideoFrameSync()
+        fs = self._receiver.frame_sync
+        fs.set_video_frame(vf)
+
         while self._running:
-            result = self._receiver.receive(ReceiveFrameType.recv_video, timeout_ms=1000)
-            if result != ReceiveFrameType.recv_video:
-                continue
-
-            buf_size = self._vf.get_buffer_size()
-            if buf_size <= 0:
-                continue
-
-            if self._buf is None or self._buf.nbytes != buf_size:
-                self._buf = np.empty(buf_size, dtype=np.uint8)
-
-            self._vf.fill_p_data(self._buf)
-            w, h = self._vf.xres, self._vf.yres
-            self.frame_ready.emit(self._buf.copy(), w, h)
+            fs.capture_video()
+            w, h = vf.xres, vf.yres
+            if w > 0 and h > 0:
+                self.frame_ready.emit(vf.get_array(), w, h)
 
     def stop(self):
         self._running = False
+        self._receiver.disconnect()  # unblocks capture_video()
         self.wait()
 
 
@@ -52,16 +45,13 @@ class NDIViewer(QMainWindow):
         self.setWindowTitle("NDI Viewer")
         self.thread: ReceiveThread | None = None
 
-        # Source list (shown before streaming)
         self.source_list = QListWidget()
         self.source_list.itemSelectionChanged.connect(self._on_selection_changed)
 
-        # Video label (shown while streaming)
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.hide()
 
-        # Buttons
         self.btn_start = QPushButton("Start Stream")
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self._start_stream)
@@ -92,7 +82,6 @@ class NDIViewer(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
 
-        # Keep Finder open to detect sources appearing/disappearing.
         self.finder = Finder()
         self.finder.open()
 
@@ -107,8 +96,7 @@ class NDIViewer(QMainWindow):
         selected_name = selected.text() if selected else None
 
         self.source_list.clear()
-        for name in names:
-            self.source_list.addItem(name)
+        self.source_list.addItems(names)
 
         if selected_name:
             matches = self.source_list.findItems(selected_name, Qt.MatchExactly)
@@ -116,8 +104,7 @@ class NDIViewer(QMainWindow):
                 self.source_list.setCurrentItem(matches[0])
 
     def _on_selection_changed(self):
-        streaming = self.thread is not None
-        self.btn_start.setEnabled(bool(self.source_list.selectedItems()) and not streaming)
+        self.btn_start.setEnabled(bool(self.source_list.selectedItems()) and self.thread is None)
 
     def _start_stream(self):
         item = self.source_list.currentItem()
@@ -131,19 +118,16 @@ class NDIViewer(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.setWindowTitle(f"NDI: {item.text()}")
 
-        self.vf = VideoRecvFrame()
         self.receiver = Receiver(color_format=RecvColorFormat.BGRX_BGRA)
-        self.receiver.set_video_frame(self.vf)
         self.receiver.set_source(source)
 
-        self.thread = ReceiveThread(self.receiver, self.vf)
+        self.thread = ReceiveThread(self.receiver)
         self.thread.frame_ready.connect(self._on_frame)
         self.thread.start()
 
     def _stop_stream(self):
         if self.thread is not None:
             self.thread.stop()
-            self.receiver.disconnect()
             self.thread = None
         self.label.hide()
         self.label.clear()
