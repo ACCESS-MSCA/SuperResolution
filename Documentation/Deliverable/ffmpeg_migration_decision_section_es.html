@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decisión de Arquitectura: Migración a FFmpeg</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #4b5563;
+      --accent: #0b5c8c;
+      --line: #d7dee8;
+      --codebg: #f8fafc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+    .wrap {
+      max-width: 920px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .05);
+    }
+    h1 { margin: 0 0 12px; color: var(--accent); }
+    h2 { margin: 16px 0 8px; color: #12425e; font-size: 1.08rem; }
+    ul { margin: 8px 0 8px 18px; }
+    code {
+      background: var(--codebg);
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+    .note { color: var(--muted); margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Decisión de Arquitectura: Migración a FFmpeg</h1>
+      <p class="note"><strong>Actualizado:</strong> 2026-05-05</p>
+      <p class="note">
+        <strong>Navegación:</strong>
+        <a href="../manual_tecnico_streaming_ndi_es.html">Core ES HTML</a> ·
+        <a href="../technical_manual_streaming_ndi_en.html">Manual EN HTML</a> ·
+        <a href="../arquitectura_visual_ndi_streaming.html">Arquitectura visual</a> ·
+        <a href="./ffmpeg_migration_decision_section_en.html">Versión EN</a>
+      </p>
+      <p class="note">
+        <strong>Nota de alineación:</strong> esta sección de deliverable está sincronizada con el paquete documental técnico completo
+        (<code>README.md</code>, <code>Documentation/manual_tecnico_streaming_ndi_es.md</code>,
+        <code>Documentation/manual_tecnico_streaming_ndi_es.html</code>, <code>Documentation/technical_manual_streaming_ndi_en.md</code> y
+        <code>Documentation/technical_manual_streaming_ndi_en.html</code>).
+      </p>
+
+      <h2>Contexto técnico</h2>
+      <ul>
+        <li>La implementación original era funcional, pero en ciertos entornos macOS apareció un conflicto de librerías nativas en el mismo proceso.</li>
+        <li>OpenCV cargaba una variante de <code>libavdevice</code> y el stack NDI HX cargaba otra variante con clases Objective-C duplicadas.</li>
+        <li>Este escenario podía provocar errores de casting espurios, comportamiento no determinista y riesgo de crash.</li>
+      </ul>
+
+      <h2>Decisión tomada</h2>
+      <ul>
+        <li>Eliminar OpenCV del camino de runtime del streamer.</li>
+        <li>Migrar probing y decode a <code>ffprobe</code>/<code>ffmpeg</code>.</li>
+        <li>Mantener procesamiento de frame/overlay con <code>numpy</code>.</li>
+      </ul>
+
+      <h2>Beneficios</h2>
+      <ul>
+        <li>Eliminación de la causa raíz del conflicto nativo.</li>
+        <li>Pipeline más predecible para integración inter-organizacional.</li>
+        <li>Compatibilidad mantenida con flujos basados en <code>np.ndarray</code>.</li>
+        <li>Rendimiento de decode alineado con objetivos del proyecto (normalmente comparable o mejor según host/carga).</li>
+      </ul>
+
+      <h2>Alcance de validación</h2>
+      <p>La solución ha sido testada en macOS y Apple Vision Pro.</p>
+
+      <h2>Artefactos relacionados</h2>
+      <ul>
+        <li>Manual completo ES (Markdown): <a href="../manual_tecnico_streaming_ndi_es.md"><code>manual_tecnico_streaming_ndi_es.md</code></a></li>
+        <li>Manual core ES (HTML): <a href="../manual_tecnico_streaming_ndi_es.html"><code>manual_tecnico_streaming_ndi_es.html</code></a></li>
+        <li>Manual completo EN (Markdown): <a href="../technical_manual_streaming_ndi_en.md"><code>technical_manual_streaming_ndi_en.md</code></a></li>
+        <li>Manual completo EN (HTML): <a href="../technical_manual_streaming_ndi_en.html"><code>technical_manual_streaming_ndi_en.html</code></a></li>
+        <li>Arquitectura visual (ES, standalone): <a href="../arquitectura_visual_ndi_streaming.html"><code>arquitectura_visual_ndi_streaming.html</code></a></li>
+      </ul>
+    </section>
+  </div>
+</body>
+</html>

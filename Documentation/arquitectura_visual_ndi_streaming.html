@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arquitectura Visual - NDI LAN Streaming</title>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --card: #ffffff;
+      --ink: #17212f;
+      --muted: #4c5a6d;
+      --line: #d8e1ee;
+      --blue: #0e5ea8;
+      --green: #0f7f66;
+      --orange: #b85a1b;
+      --shadow: 0 10px 24px rgba(11, 28, 52, .08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 7% 8%, #e2efff 0%, transparent 35%),
+        radial-gradient(circle at 92% 5%, #e4fff3 0%, transparent 32%),
+        var(--bg);
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 26px auto 46px;
+      padding: 0 16px;
+    }
+
+    .hero {
+      background: linear-gradient(120deg, #0e5ea8, #0f7f66);
+      color: #fff;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 14px 30px rgba(14, 94, 168, .3);
+      margin-bottom: 16px;
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 1.95rem;
+      letter-spacing: .2px;
+    }
+
+    .hero p { margin: 6px 0; opacity: .95; }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      border: 1px solid rgba(255,255,255,.35);
+      border-radius: 999px;
+      padding: 3px 10px;
+      background: rgba(255,255,255,.14);
+      font-size: .83rem;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+      margin-bottom: 14px;
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      color: var(--blue);
+      font-size: 1.25rem;
+    }
+
+    .small { color: var(--muted); font-size: .93rem; }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .step {
+      border: 1px solid #cfe0f6;
+      background: #f8fbff;
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 90px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .step strong { color: #0d4f8c; font-size: .95rem; }
+    .step span { color: var(--muted); font-size: .86rem; }
+
+    .arrow {
+      text-align: center;
+      color: #4f78a2;
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
+    }
+
+    .module {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .module h3 {
+      margin: 0 0 8px;
+      font-size: 1rem;
+      color: #10436f;
+    }
+
+    .module ul { margin: 0; padding-left: 18px; }
+    .module li { margin: 5px 0; font-size: .92rem; }
+
+    .seq {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+    }
+
+    .seq-item {
+      border: 1px dashed #b9cbe2;
+      border-radius: 12px;
+      padding: 11px;
+      background: #fbfdff;
+    }
+
+    .seq-id {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      background: #0e5ea8;
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .8rem;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .tag {
+      border-radius: 999px;
+      border: 1px solid #d5dfeb;
+      padding: 3px 9px;
+      font-size: .8rem;
+      background: #fff;
+      color: #38506b;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #f4f7fc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-size: .9em;
+    }
+
+    @media (max-width: 950px) {
+      .pipeline { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>Arquitectura Visual · NDI LAN Streaming</h1>
+      <p>Vista rápida, visual y orientada a decisiones para entender cómo fluye vídeo/audio/metadata en el proyecto.</p>
+      <div class="pill-row">
+        <span class="pill">Fuente principal: <code>stream_video.py</code></span>
+        <span class="pill">Decode: <code>ffmpeg.py</code></span>
+        <span class="pill">Última revisión: 2026-05-05</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>0) Navegación Documental</h2>
+      <ul>
+        <li>Volver al core principal: <a href="./manual_tecnico_streaming_ndi_es.html"><code>manual_tecnico_streaming_ndi_es.html</code></a></li>
+        <li>Manual ES (Markdown): <a href="./manual_tecnico_streaming_ndi_es.md"><code>manual_tecnico_streaming_ndi_es.md</code></a></li>
+        <li>Manual EN (HTML): <a href="./technical_manual_streaming_ndi_en.html"><code>technical_manual_streaming_ndi_en.html</code></a></li>
+        <li>Deliverable FFmpeg ES (HTML): <a href="./Deliverable/ffmpeg_migration_decision_section_es.html"><code>Deliverable/ffmpeg_migration_decision_section_es.html</code></a></li>
+        <li>Deliverable FFmpeg EN (HTML): <a href="./Deliverable/ffmpeg_migration_decision_section_en.html"><code>Deliverable/ffmpeg_migration_decision_section_en.html</code></a></li>
+      </ul>
+      <p class="small">Este documento es satélite: su ruta de retorno principal es siempre el core técnico en ES.</p>
+    </section>
+
+    <section class="card">
+      <h2>1) Pipeline End-to-End</h2>
+      <p class="small">Flujo principal desde CLI hasta envío NDI con pacing monotónico y canal de retorno opcional.</p>
+      <div class="pipeline">
+        <div class="step"><strong>Entrada CLI</strong><span>Vídeo + flags (<code>--dual</code>, metadata RX)</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><strong>Preflight</strong><span><code>ffprobe</code>: resolución, fps, frames</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><strong>Decode</strong><span><code>ffmpeg</code>: BGRA + audio float32</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><strong>Loop de envío</strong><span>Frame + bloque audio + overlay opcional</span></div>
+        <div class="arrow">→</div>
+        <div class="step"><strong>Salida NDI</strong><span>Señal principal (+ <code>-Square</code> en dual)</span></div>
+      </div>
+      <div class="legend">
+        <span class="tag">Formato vídeo: BGRA</span>
+        <span class="tag">Audio: float32, 48 kHz, 2ch</span>
+        <span class="tag">Timing: <code>MonotonicFrameClock</code></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2) Mapa de Módulos</h2>
+      <div class="grid-2">
+        <article class="module">
+          <h3>Orquestación</h3>
+          <ul>
+            <li><code>stream_video.py</code> coordina setup, loop, envío y cleanup.</li>
+            <li>Gestiona reinicio de decoder si el pipe cae.</li>
+            <li>Activa/desactiva metadata RX por flag.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Decode y metadata multimedia</h3>
+          <ul>
+            <li><code>ffmpeg.py</code>: <code>probe_video</code>, <code>start_video_decoder</code>, <code>decode_audio_to_array</code>.</li>
+            <li>Aísla subprocessos de ffmpeg/ffprobe.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Render y sender</h3>
+          <ul>
+            <li><code>utils.py</code>: <code>make_sender</code>, <code>draw_square</code>, <code>_pixelate_roi</code>.</li>
+            <li>Overlay solo en modo dual.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Timing</h3>
+          <ul>
+            <li><code>core/clock.py</code> evita deriva acumulada.</li>
+            <li>Resincroniza cuando hay overrun.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Backchannel genérico</h3>
+          <ul>
+            <li><code>extensions/backchannel/receiver.py</code> captura metadata XML en sender.</li>
+            <li><code>extensions/backchannel/dispatcher.py</code> enruta mensajes a handlers.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Integración Unity</h3>
+          <ul>
+            <li><code>integrations/unity/parsers.py</code> parsea <code>access_transform</code>.</li>
+            <li><code>integrations/unity/handlers.py</code> loguea eventos parseados.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3) Secuencia de un Frame</h2>
+      <div class="seq">
+        <div class="seq-item"><span class="seq-id">1</span> Leer bytes exactos de vídeo BGRA.</div>
+        <div class="seq-item"><span class="seq-id">2</span> Construir <code>np.ndarray</code> writable con <code>.copy()</code>.</div>
+        <div class="seq-item"><span class="seq-id">3</span> Tomar bloque de audio (con wrap si llega al final).</div>
+        <div class="seq-item"><span class="seq-id">4</span> Enviar <code>write_video_and_audio()</code> al sender principal.</div>
+        <div class="seq-item"><span class="seq-id">5</span> Si <code>--dual</code>, clonar frame + aplicar <code>draw_square()</code>.</div>
+        <div class="seq-item"><span class="seq-id">6</span> Drenar metadata RX y despachar handlers.</div>
+        <div class="seq-item"><span class="seq-id">7</span> Esperar siguiente deadline con reloj monotónico.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4) Modos de Ejecución</h2>
+      <div class="grid-2">
+        <article class="module">
+          <h3>Modo Base</h3>
+          <ul>
+            <li>1 salida NDI limpia.</li>
+            <li>Metadata RX activa por defecto.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Modo Dual</h3>
+          <ul>
+            <li>Salida principal + salida <code>-Square</code>.</li>
+            <li>Más coste por copia/overlay/envío.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Sin metadata RX</h3>
+          <ul>
+            <li>Flag: <code>--no-rx-metadata</code>.</li>
+            <li>Streamer queda como emisor A/V puro.</li>
+          </ul>
+        </article>
+        <article class="module">
+          <h3>Perfil WAN lowres</h3>
+          <ul>
+            <li>Launcher: <code>Launchers/Stream_NDI_LowRes_WAN.command</code>.</li>
+            <li>Objetivo: más estabilidad en enlaces limitados.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+  </div>
+</body>
+</html>
