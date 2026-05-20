@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+import time
 
 import numpy as np
 from cyndilib.audio_frame import AudioSendFrame
@@ -21,7 +22,7 @@ from cyndilib.audio_frame import AudioSendFrame
 from core import MonotonicFrameClock
 from extensions.backchannel import MetadataDispatcher, NdiSenderBackchannelReceiver
 from ffmpeg import decode_audio_to_array, probe_video, read_exact, start_video_decoder
-from integrations.unity import UnityTransformLogHandler
+from integrations.unity import UnityTransformLogHandler, UnityViewportMetadata, UnityViewportStateHandler
 from utils import draw_square, make_sender
 
 
@@ -30,6 +31,219 @@ def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples:
     af.sample_rate = sample_rate
     af.num_channels = channels
     sender.set_audio_frame(af)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    def clip_left(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not points:
+            return []
+        out: list[tuple[float, float]] = []
+        prev = points[-1]
+        prev_in = prev[0] >= 0.0
+        for cur in points:
+            cur_in = cur[0] >= 0.0
+            if cur_in != prev_in:
+                dx = cur[0] - prev[0]
+                t = 0.0 if abs(dx) < 1e-8 else (0.0 - prev[0]) / dx
+                out.append((0.0, prev[1] + t * (cur[1] - prev[1])))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+        return out
+
+    def clip_right(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not points:
+            return []
+        out: list[tuple[float, float]] = []
+        prev = points[-1]
+        prev_in = prev[0] <= 1.0
+        for cur in points:
+            cur_in = cur[0] <= 1.0
+            if cur_in != prev_in:
+                dx = cur[0] - prev[0]
+                t = 0.0 if abs(dx) < 1e-8 else (1.0 - prev[0]) / dx
+                out.append((1.0, prev[1] + t * (cur[1] - prev[1])))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+        return out
+
+    def clip_bottom(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not points:
+            return []
+        out: list[tuple[float, float]] = []
+        prev = points[-1]
+        prev_in = prev[1] >= 0.0
+        for cur in points:
+            cur_in = cur[1] >= 0.0
+            if cur_in != prev_in:
+                dy = cur[1] - prev[1]
+                t = 0.0 if abs(dy) < 1e-8 else (0.0 - prev[1]) / dy
+                out.append((prev[0] + t * (cur[0] - prev[0]), 0.0))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+        return out
+
+    def clip_top(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        if not points:
+            return []
+        out: list[tuple[float, float]] = []
+        prev = points[-1]
+        prev_in = prev[1] <= 1.0
+        for cur in points:
+            cur_in = cur[1] <= 1.0
+            if cur_in != prev_in:
+                dy = cur[1] - prev[1]
+                t = 0.0 if abs(dy) < 1e-8 else (1.0 - prev[1]) / dy
+                out.append((prev[0] + t * (cur[0] - prev[0]), 1.0))
+            if cur_in:
+                out.append(cur)
+            prev, prev_in = cur, cur_in
+        return out
+
+    clipped = clip_left(poly)
+    clipped = clip_right(clipped)
+    clipped = clip_bottom(clipped)
+    clipped = clip_top(clipped)
+    return clipped
+
+
+def _order_polygon_ccw(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if len(poly) < 3:
+        return poly
+
+    # Deduplicate near-identical points first.
+    unique: list[tuple[float, float]] = []
+    for p in poly:
+        if not any(abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) < 1e-6 for q in unique):
+            unique.append(p)
+    if len(unique) < 3:
+        return unique
+
+    cx = sum(p[0] for p in unique) / len(unique)
+    cy = sum(p[1] for p in unique) / len(unique)
+    return sorted(unique, key=lambda p: np.arctan2(p[1] - cy, p[0] - cx))
+
+
+def _unwrap_polygon_u(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if len(poly) < 2:
+        return poly
+
+    out = [poly[0]]
+    offset = 0.0
+    prev_u = poly[0][0]
+    for u, v in poly[1:]:
+        candidate_u = u + offset
+        while candidate_u - prev_u > 0.5:
+            offset -= 1.0
+            candidate_u = u + offset
+        while prev_u - candidate_u > 0.5:
+            offset += 1.0
+            candidate_u = u + offset
+
+        out.append((candidate_u, v))
+        prev_u = candidate_u
+
+    return out
+
+
+def _fill_polygon(frame_bgra: np.ndarray, pts: list[tuple[int, int]], color: np.ndarray, alpha: float) -> None:
+    if len(pts) < 3:
+        return
+
+    height, width = frame_bgra.shape[0], frame_bgra.shape[1]
+    y_min = max(0, min(p[1] for p in pts))
+    y_max = min(height - 1, max(p[1] for p in pts))
+    if y_min > y_max:
+        return
+
+    blend = max(0.0, min(1.0, float(alpha)))
+    if blend <= 0.0:
+        return
+
+    src_rgb = color[:3].astype(np.float32)
+    for y in range(y_min, y_max + 1):
+        intersections: list[float] = []
+        for i in range(len(pts)):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % len(pts)]
+            if y0 == y1:
+                continue
+
+            if (y >= min(y0, y1)) and (y < max(y0, y1)):
+                t = (y - y0) / (y1 - y0)
+                intersections.append(x0 + t * (x1 - x0))
+
+        if len(intersections) < 2:
+            continue
+
+        intersections.sort()
+        for i in range(0, len(intersections) - 1, 2):
+            x_min = max(0, int(np.ceil(intersections[i])))
+            x_max = min(width - 1, int(np.floor(intersections[i + 1])))
+            if x_min > x_max:
+                continue
+
+            dst = frame_bgra[y, x_min:x_max + 1, :3].astype(np.float32)
+            frame_bgra[y, x_min:x_max + 1, :3] = (dst * (1.0 - blend) + src_rgb * blend).astype(np.uint8)
+            frame_bgra[y, x_min:x_max + 1, 3] = 255
+
+
+def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int = 4) -> None:
+    if not viewport.plane_intersection:
+        return
+
+    height, width = frame_bgra.shape[0], frame_bgra.shape[1]
+    if height < 2 or width < 2:
+        return
+
+    corners = list(viewport.uv_polygon)
+    if len(corners) < 3:
+        return
+
+    # BGRA red
+    color = np.array([0, 0, 255, 255], dtype=np.uint8)
+    t = max(1, int(thickness))
+
+    is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
+    ordered = _unwrap_polygon_u(corners) if is_equirectangular else corners
+    u_shifts = (-1.0, 0.0, 1.0) if is_equirectangular else (0.0,)
+
+    for u_shift in u_shifts:
+        shifted = [(u + u_shift, v) for u, v in ordered]
+        clipped = _clip_polygon_unit_square(shifted)
+        if len(clipped) < 3:
+            continue
+
+        pts = []
+        for u, v in clipped:
+            x = int(round(_clamp01(u) * (width - 1)))
+            y = int(round((1.0 - _clamp01(v)) * (height - 1)))
+            pts.append((x, y))
+
+        if len(pts) < 3:
+            continue
+
+        _fill_polygon(frame_bgra, pts, color, alpha=0.18)
+
+        for i in range(len(pts)):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % len(pts)]
+            steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+            for s in range(steps + 1):
+                a = s / steps
+                x = int(round(x0 + (x1 - x0) * a))
+                y = int(round(y0 + (y1 - y0) * a))
+                x_min = max(0, x - t // 2)
+                x_max = min(width, x + (t + 1) // 2)
+                y_min = max(0, y - t // 2)
+                y_max = min(height, y + (t + 1) // 2)
+                frame_bgra[y_min:y_max, x_min:x_max] = color
 
 
 def stream_video(
@@ -103,6 +317,8 @@ def stream_video(
     clock = MonotonicFrameClock(fps_float)
     backchannel = None
     dispatcher = None
+    viewport_handler = None
+    viewport_stale_timeout_seconds = 3.0
 
     with sender_plain:
         if sender_overlay is not None:
@@ -110,6 +326,7 @@ def stream_video(
 
         if rx_metadata:
             try:
+                viewport_handler = UnityViewportStateHandler()
                 backchannel = NdiSenderBackchannelReceiver(
                     sender_plain,
                     timeout_ms=0,
@@ -118,14 +335,18 @@ def stream_video(
                 )
                 backchannel.start()
                 dispatcher = MetadataDispatcher(
-                    handlers=[UnityTransformLogHandler()],
+                    handlers=[
+                        UnityTransformLogHandler(),
+                        viewport_handler,
+                    ],
                     verbose_raw_xml=rx_metadata_verbose,
-                    log_unhandled=True,
+                    log_unhandled=False,
                 )
                 print("[info] backchannel receiver started")
             except Exception as exc:
                 backchannel = None
                 dispatcher = None
+                viewport_handler = None
                 print(f"[warn] could not start backchannel receiver: {exc}")
 
         try:
@@ -146,8 +367,17 @@ def stream_video(
                         print("Error: failed to read first frame after decoder restart")
                         break
 
+                if backchannel is not None and dispatcher is not None:
+                    messages = backchannel.drain(max_messages=32)
+                    if messages:
+                        dispatcher.dispatch_many(messages)
+
                 # frombuffer(raw, ...) over bytes is read-only; cyndilib expects writable memory
                 bgra = np.frombuffer(raw, dtype=np.uint8).copy().reshape((height, width, 4))
+                if viewport_handler is not None and viewport_handler.state.latest is not None:
+                    age = time.monotonic() - viewport_handler.state.last_update_monotonic
+                    if age <= viewport_stale_timeout_seconds:
+                        _draw_viewport_roi(bgra, viewport_handler.state.latest)
                 plain_frame = bgra.ravel()
 
                 if audio_enabled and total_audio_samples > 0:
@@ -178,11 +408,6 @@ def stream_video(
                         draw_square(bgra_sq, frame_idx)
                         overlay_frame = bgra_sq.ravel()
                         sender_overlay.write_video_async(overlay_frame)
-
-                if backchannel is not None and dispatcher is not None:
-                    messages = backchannel.drain(max_messages=32)
-                    if messages:
-                        dispatcher.dispatch_many(messages)
 
                 frame_idx += 1
 

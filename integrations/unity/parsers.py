@@ -24,6 +24,25 @@ class UnityTransformMetadata:
     scale: Optional[tuple[float, float, float]]
 
 
+@dataclass(frozen=True)
+class UnityViewportMetadata:
+    source_id: str
+    sequence: int
+    scene: str
+    camera: str
+    uv_projection: str
+    hit_any: bool
+    plane_intersection: bool
+    hit_center: bool
+    corner_hits: int
+    uv_center: tuple[float, float]
+    uv_min: tuple[float, float]
+    uv_max: tuple[float, float]
+    uv_corners: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]
+    uv_corner_direct_hits: tuple[bool, bool, bool, bool]
+    uv_polygon: tuple[tuple[float, float], ...]
+
+
 def try_parse_unity_transform(message: NdiMetadataMessage) -> Optional[UnityTransformMetadata]:
     if message.tag != "access_transform":
         return None
@@ -61,4 +80,65 @@ def try_parse_unity_transform(message: NdiMetadataMessage) -> Optional[UnityTran
         position=(_f("px"), _f("py"), _f("pz")),
         rotation=(_f("qx"), _f("qy"), _f("qz"), _f("qw")),
         scale=scale,
+    )
+
+
+def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewportMetadata]:
+    if message.tag != "access_viewport":
+        return None
+
+    attrs = message.attrs
+
+    def _f(name: str, default: float = 0.0) -> float:
+        value = attrs.get(name)
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
+    def _i(name: str, default: int = 0) -> int:
+        value = attrs.get(name)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except ValueError:
+            return default
+
+    def _b(name: str) -> bool:
+        return attrs.get(name, "0") in ("1", "true", "True")
+
+    poly_n = max(0, min(64, _i("uv_poly_n")))
+    poly: list[tuple[float, float]] = []
+    for i in range(poly_n):
+        poly.append((_f(f"uv_poly{i}_x"), _f(f"uv_poly{i}_y")))
+
+    return UnityViewportMetadata(
+        source_id=attrs.get("id", ""),
+        sequence=_i("seq"),
+        scene=attrs.get("scene", ""),
+        camera=attrs.get("camera", ""),
+        uv_projection=attrs.get("uv_projection", ""),
+        hit_any=_b("hit_any"),
+        plane_intersection=_b("plane_intersection"),
+        hit_center=_b("hit_center"),
+        corner_hits=_i("corner_hits"),
+        uv_center=(_f("uv_cx"), _f("uv_cy")),
+        uv_min=(_f("uv_min_x"), _f("uv_min_y")),
+        uv_max=(_f("uv_max_x"), _f("uv_max_y")),
+        uv_corners=(
+            (_f("uv00_x"), _f("uv00_y")),  # BL
+            (_f("uv01_x"), _f("uv01_y")),  # TL
+            (_f("uv11_x"), _f("uv11_y")),  # TR
+            (_f("uv10_x"), _f("uv10_y")),  # BR
+        ),
+        uv_corner_direct_hits=(
+            _b("uv00_hit"),
+            _b("uv01_hit"),
+            _b("uv11_hit"),
+            _b("uv10_hit"),
+        ),
+        uv_polygon=tuple(poly),
     )
