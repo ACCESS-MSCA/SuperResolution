@@ -25,6 +25,9 @@ from ffmpeg import decode_audio_to_array, probe_video, read_exact, start_video_d
 from integrations.unity import UnityTransformLogHandler, UnityViewportMetadata, UnityViewportStateHandler
 from utils import draw_square, make_sender
 
+_ERP_DIRECTION_GRID_CACHE: dict[tuple[int, int], np.ndarray] = {}
+_ERP_ROI_MASK_CACHE: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
+
 
 def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples: int) -> None:
     af = AudioSendFrame(max_num_samples=max_samples)
@@ -194,6 +197,82 @@ def _fill_polygon(frame_bgra: np.ndarray, pts: list[tuple[int, int]], color: np.
             frame_bgra[y, x_min:x_max + 1, 3] = 255
 
 
+def _get_erp_direction_grid(width: int, height: int) -> np.ndarray:
+    key = (width, height)
+    cached = _ERP_DIRECTION_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    u = np.linspace(0.0, 1.0, width, dtype=np.float32)
+    v = np.linspace(1.0, 0.0, height, dtype=np.float32)
+    yaw = (u - 0.5) * (2.0 * np.pi)
+    pitch = (v - 0.5) * np.pi
+    sin_yaw = np.sin(yaw).astype(np.float32)
+    cos_yaw = np.cos(yaw).astype(np.float32)
+    sin_pitch = np.sin(pitch).astype(np.float32)
+    cos_pitch = np.cos(pitch).astype(np.float32)[:, None]
+
+    directions = np.empty((height, width, 3), dtype=np.float32)
+    directions[..., 0] = cos_pitch * sin_yaw[None, :]
+    directions[..., 1] = sin_pitch[:, None]
+    directions[..., 2] = cos_pitch * cos_yaw[None, :]
+    _ERP_DIRECTION_GRID_CACHE[key] = directions
+    return directions
+
+
+def _draw_equirectangular_frustum_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int, color: np.ndarray) -> bool:
+    height, width = frame_bgra.shape[0], frame_bgra.shape[1]
+    cache_key = (width, height, viewport.sequence)
+    cached = _ERP_ROI_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        mask, edge = cached
+    else:
+        normals = np.asarray(viewport.erp_edge_normals, dtype=np.float32)
+        if normals.shape != (4, 3):
+            return False
+
+        lengths = np.linalg.norm(normals, axis=1)
+        if np.any(lengths < 1e-6):
+            return False
+
+        normals = normals / lengths[:, None]
+        directions = _get_erp_direction_grid(width, height)
+        dots = np.tensordot(directions, normals, axes=([2], [1]))
+        mask = np.all(dots >= -1e-5, axis=2)
+        if not np.any(mask):
+            return False
+
+        edge = np.zeros_like(mask)
+        vertical = mask[1:, :] ^ mask[:-1, :]
+        edge[1:, :] |= vertical
+        edge[:-1, :] |= vertical
+        edge |= mask ^ np.roll(mask, 1, axis=1)
+        edge |= mask ^ np.roll(mask, -1, axis=1)
+
+        _ERP_ROI_MASK_CACHE.clear()
+        _ERP_ROI_MASK_CACHE[cache_key] = (mask, edge)
+
+    src_rgb = color[:3].astype(np.float32)
+    dst = frame_bgra[..., :3].astype(np.float32)
+    dst[mask] = dst[mask] * 0.82 + src_rgb * 0.18
+    frame_bgra[..., :3] = dst.astype(np.uint8)
+    frame_bgra[..., 3] = 255
+
+    t = max(1, int(thickness))
+    if t > 1:
+        expanded = edge.copy()
+        radius = max(1, t // 2)
+        for offset in range(1, radius + 1):
+            expanded |= np.roll(edge, offset, axis=0)
+            expanded |= np.roll(edge, -offset, axis=0)
+            expanded |= np.roll(edge, offset, axis=1)
+            expanded |= np.roll(edge, -offset, axis=1)
+        edge = expanded
+
+    frame_bgra[edge] = color
+    return True
+
+
 def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int = 4) -> None:
     if not viewport.plane_intersection:
         return
@@ -211,11 +290,20 @@ def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, 
     t = max(1, int(thickness))
 
     is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
+    if is_equirectangular and viewport.erp_frustum_valid:
+        if _draw_equirectangular_frustum_roi(frame_bgra, viewport, t, color):
+            return
+
     ordered = _unwrap_polygon_u(corners) if is_equirectangular else corners
     u_shifts = (-1.0, 0.0, 1.0) if is_equirectangular else (0.0,)
 
     for u_shift in u_shifts:
         shifted = [(u + u_shift, v) for u, v in ordered]
+        if is_equirectangular and viewport.contains_north_pole and not viewport.contains_south_pole:
+            shifted = shifted + [(shifted[-1][0], 1.0), (1.0, 1.0), (0.0, 1.0), (shifted[0][0], 1.0)]
+        elif is_equirectangular and viewport.contains_south_pole and not viewport.contains_north_pole:
+            shifted = shifted + [(shifted[-1][0], 0.0), (1.0, 0.0), (0.0, 0.0), (shifted[0][0], 0.0)]
+
         clipped = _clip_polygon_unit_square(shifted)
         if len(clipped) < 3:
             continue

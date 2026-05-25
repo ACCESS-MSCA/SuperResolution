@@ -61,6 +61,9 @@ class UnityViewportStateHandler:
                 f"({viewport.uv_max[0]:.3f},{viewport.uv_max[1]:.3f}) "
                 f"hit_any={int(viewport.hit_any)} "
                 f"plane_intersection={int(viewport.plane_intersection)} "
-                f"poly_n={len(viewport.uv_polygon)}"
+                f"poly_n={len(viewport.uv_polygon)} "
+                f"erp_frustum={int(viewport.erp_frustum_valid)} "
+                f"north_pole={int(viewport.contains_north_pole)} "
+                f"south_pole={int(viewport.contains_south_pole)}"
             )
         return True

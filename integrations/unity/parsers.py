@@ -35,6 +35,10 @@ class UnityViewportMetadata:
     plane_intersection: bool
     hit_center: bool
     corner_hits: int
+    contains_north_pole: bool
+    contains_south_pole: bool
+    erp_frustum_valid: bool
+    erp_edge_normals: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
     uv_center: tuple[float, float]
     uv_min: tuple[float, float]
     uv_max: tuple[float, float]
@@ -125,6 +129,15 @@ def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewp
         plane_intersection=_b("plane_intersection"),
         hit_center=_b("hit_center"),
         corner_hits=_i("corner_hits"),
+        contains_north_pole=_b("uv_contains_north_pole"),
+        contains_south_pole=_b("uv_contains_south_pole"),
+        erp_frustum_valid=_b("erp_frustum_valid"),
+        erp_edge_normals=(
+            (_f("erp_edge0_nx"), _f("erp_edge0_ny"), _f("erp_edge0_nz")),
+            (_f("erp_edge1_nx"), _f("erp_edge1_ny"), _f("erp_edge1_nz")),
+            (_f("erp_edge2_nx"), _f("erp_edge2_ny"), _f("erp_edge2_nz")),
+            (_f("erp_edge3_nx"), _f("erp_edge3_ny"), _f("erp_edge3_nz")),
+        ),
         uv_center=(_f("uv_cx"), _f("uv_cy")),
         uv_min=(_f("uv_min_x"), _f("uv_min_y")),
         uv_max=(_f("uv_max_x"), _f("uv_max_y")),
