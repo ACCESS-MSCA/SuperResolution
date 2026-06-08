@@ -126,7 +126,7 @@
       <div class="meta">
         <span class="pill">Project: Py_NDI</span>
         <span class="pill">Focus: NDI LAN streaming</span>
-        <span class="pill">Last updated: 2026-05-05</span>
+        <span class="pill">Last updated: 2026-05-27</span>
       </div>
     </section>
 
@@ -424,17 +424,42 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
 
       <h3>Technical components</h3>
       <ul>
-        <li>Unity: <code>NdiReceiverMetadataSender</code>, <code>NdiTransformMetadataPayloadProvider</code>, <code>NdiMetadataInterop</code>.</li>
+        <li>Unity: <code>NdiReceiverMetadataSender</code>, <code>NdiTransformMetadataPayloadProvider</code>, <code>NdiHeadViewportMetadataPayloadProvider</code>, <code>NdiMetadataInterop</code>.</li>
         <li>Server: <code>extensions/backchannel/receiver.py</code>, <code>extensions/backchannel/dispatcher.py</code>, <code>integrations/unity/parsers.py</code>, <code>integrations/unity/handlers.py</code>, plus integration in <code>stream_video.py</code>.</li>
       </ul>
 
       <h3>Runtime flow</h3>
       <ol>
-        <li>Unity builds XML payload <code>&lt;access_transform ... /&gt;</code>.</li>
+        <li>Unity builds XML payloads such as <code>&lt;access_transform ... /&gt;</code>, <code>&lt;access_viewport ... /&gt;</code>, or <code>&lt;access_client ... /&gt;</code>.</li>
         <li>Unity sends metadata through <code>NDIlib_recv_send_metadata</code>.</li>
         <li>Python sender captures incoming metadata with <code>NDIlib_send_capture</code>.</li>
-        <li>Server parses XML, extracts transform data, and logs received events.</li>
+        <li>Server parses XML, updates the latest state, and draws debug overlays into the NDI video frame before sending it.</li>
       </ol>
+
+      <h3><code>access_viewport</code> contract aligned with Unity</h3>
+      <p>Unity/AVP computes the 3D math locally because it owns the camera, head transform, collider and surface orientation. Python does not raycast against Unity: it receives a compact description in NDI texture coordinates and converts it into pixels on the frame it publishes.</p>
+      <ul>
+        <li><code>uv_projection</code>: surface projection mode (<code>MeshTextureCoordinates</code>, <code>EquirectangularSphere</code>, etc.).</li>
+        <li><code>uv_poly_n</code> + <code>uv_poly{i}_x/y</code>: visible viewport polygon in normalized <code>[0..1]</code> UVs.</li>
+        <li><code>gaze_hit</code>: <code>1</code> when the camera center ray directly intersects the NDI surface.</li>
+        <li><code>gaze_uv_x/y</code>: exact gaze point in UVs. Use only when <code>gaze_hit=1</code>.</li>
+        <li><code>gaze_world_x/y/z</code>: world-space center intersection point when Unity includes it.</li>
+        <li><code>uv_cx/uv_cy</code>: useful ROI center kept for compatibility; it can be a centroid/fallback and should not be used as the precise gaze point.</li>
+        <li><code>erp_frustum_valid</code> + <code>erp_corner{i}_x/y/z</code>: normalized directions of the four viewport corners for equirectangular spheres/hemispheres.</li>
+        <li><code>erp_edge{i}_nx/ny/nz</code>: lateral frustum planes, kept for advanced consumers and fallback/debug.</li>
+        <li><code>uv_contains_north_pole</code> / <code>uv_contains_south_pole</code>: pole flags for ERP region resolution.</li>
+        <li><code>seq</code>: sequence number; Python uses it to avoid repeating work when metadata has not changed, especially for expensive fallbacks.</li>
+      </ul>
+
+      <h3>How Python draws visual feedback</h3>
+      <ul>
+        <li>Plane: converts UV to pixel with <code>x = round(u * (width - 1))</code> and <code>y = round((1 - v) * (height - 1))</code>, inverting <code>v</code> because image rows start at the top.</li>
+        <li>Plane ROI: <code>stream_video.py</code> draws only the red outline from <code>uv_polygon</code>.</li>
+        <li>Hit marker: when <code>gaze_hit=1</code>, draws a yellow <code>+</code> at <code>gaze_uv_x/y</code>. This is constant cost: two thin rectangles on the frame.</li>
+        <li>ERP: the primary path draws the real frustum edges. Python interpolates each pair of <code>erp_corner</code> directions with <code>slerp</code>, converts samples to equirectangular UV, and splits the polyline when it crosses the <code>u=0/1</code> seam. <code>uv_polygon</code> remains as fallback/debug.</li>
+        <li>Performance: the interior is never painted, for either planes or ERP. Outline masks are cached by resolution, <code>seq</code>, thickness and polygon/ERP corners. Viewport logs are rate-limited so stdout cannot become a bottleneck.</li>
+        <li>Staleness: if no fresh metadata arrives within <code>viewport_stale_timeout_seconds</code>, Python stops drawing overlays and the frame returns clean.</li>
+      </ul>
 
       <h3>CLI and logging (server)</h3>
       <ul>
@@ -449,6 +474,7 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
       <ul>
         <li><code>[RX-META]</code>: raw XML message received.</li>
         <li><code>[RX Transform]</code>: transform payload parsed successfully.</li>
+        <li><code>[RX Viewport]</code>: ROI/gaze payload parsed successfully. Includes <code>poly_n</code>, <code>gaze_hit</code>, <code>gaze_uv</code>, and ERP state.</li>
         <li><code>cap_meta</code> in final summary: metadata frames captured by <code>send_capture</code>.</li>
         <li><code>received</code>: valid parsed messages queued by the backchannel.</li>
       </ul>
@@ -459,7 +485,8 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
       <h3>Validated state</h3>
       <ul>
         <li>Validated in real Unity Editor -&gt; Python server workflow.</li>
-        <li>Confirmed reception of <code>access_client</code> and <code>access_transform</code>.</li>
+        <li>Confirmed reception of <code>access_client</code>, <code>access_transform</code>, and <code>access_viewport</code>.</li>
+        <li>Visual feedback confirmed: red ROI outline and gaze <code>+</code> hit marker.</li>
       </ul>
     </section>
 

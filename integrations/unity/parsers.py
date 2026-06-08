@@ -34,12 +34,16 @@ class UnityViewportMetadata:
     hit_any: bool
     plane_intersection: bool
     hit_center: bool
+    gaze_hit: bool
     corner_hits: int
     contains_north_pole: bool
     contains_south_pole: bool
     erp_frustum_valid: bool
     erp_edge_normals: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
+    erp_corner_directions: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]
     uv_center: tuple[float, float]
+    gaze_uv: tuple[float, float]
+    gaze_world: tuple[float, float, float]
     uv_min: tuple[float, float]
     uv_max: tuple[float, float]
     uv_corners: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]
@@ -114,7 +118,7 @@ def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewp
     def _b(name: str) -> bool:
         return attrs.get(name, "0") in ("1", "true", "True")
 
-    poly_n = max(0, min(64, _i("uv_poly_n")))
+    poly_n = max(0, min(128, _i("uv_poly_n")))
     poly: list[tuple[float, float]] = []
     for i in range(poly_n):
         poly.append((_f(f"uv_poly{i}_x"), _f(f"uv_poly{i}_y")))
@@ -128,6 +132,7 @@ def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewp
         hit_any=_b("hit_any"),
         plane_intersection=_b("plane_intersection"),
         hit_center=_b("hit_center"),
+        gaze_hit=_b("gaze_hit") or _b("hit_center"),
         corner_hits=_i("corner_hits"),
         contains_north_pole=_b("uv_contains_north_pole"),
         contains_south_pole=_b("uv_contains_south_pole"),
@@ -138,7 +143,22 @@ def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewp
             (_f("erp_edge2_nx"), _f("erp_edge2_ny"), _f("erp_edge2_nz")),
             (_f("erp_edge3_nx"), _f("erp_edge3_ny"), _f("erp_edge3_nz")),
         ),
+        erp_corner_directions=(
+            (_f("erp_corner0_x"), _f("erp_corner0_y"), _f("erp_corner0_z")),
+            (_f("erp_corner1_x"), _f("erp_corner1_y"), _f("erp_corner1_z")),
+            (_f("erp_corner2_x"), _f("erp_corner2_y"), _f("erp_corner2_z")),
+            (_f("erp_corner3_x"), _f("erp_corner3_y"), _f("erp_corner3_z")),
+        ),
         uv_center=(_f("uv_cx"), _f("uv_cy")),
+        gaze_uv=(
+            _f("gaze_uv_x", _f("uv_cx")),
+            _f("gaze_uv_y", _f("uv_cy")),
+        ),
+        gaze_world=(
+            _f("gaze_world_x", _f("world_cx")),
+            _f("gaze_world_y", _f("world_cy")),
+            _f("gaze_world_z", _f("world_cz")),
+        ),
         uv_min=(_f("uv_min_x"), _f("uv_min_y")),
         uv_max=(_f("uv_max_x"), _f("uv_max_y")),
         uv_corners=(

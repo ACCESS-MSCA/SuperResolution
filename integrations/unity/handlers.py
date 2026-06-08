@@ -40,9 +40,11 @@ class UnityViewportState:
 class UnityViewportStateHandler:
     """Consumes Unity viewport metadata and keeps the latest ROI state."""
 
-    def __init__(self) -> None:
+    def __init__(self, log_interval_seconds: float = 1.0) -> None:
         self.state = UnityViewportState()
         self._last_sequence = -1
+        self._last_log_monotonic = 0.0
+        self._log_interval_seconds = max(0.0, float(log_interval_seconds))
 
     def handle(self, message: NdiMetadataMessage) -> bool:
         viewport = try_parse_unity_viewport(message)
@@ -51,8 +53,13 @@ class UnityViewportStateHandler:
 
         self.state.latest = viewport
         self.state.last_update_monotonic = time.monotonic()
-        if viewport.sequence != self._last_sequence:
+        should_log = (
+            viewport.sequence != self._last_sequence
+            and self.state.last_update_monotonic - self._last_log_monotonic >= self._log_interval_seconds
+        )
+        if should_log:
             self._last_sequence = viewport.sequence
+            self._last_log_monotonic = self.state.last_update_monotonic
             print(
                 "[RX Viewport] "
                 f"seq={viewport.sequence} "
@@ -62,6 +69,8 @@ class UnityViewportStateHandler:
                 f"hit_any={int(viewport.hit_any)} "
                 f"plane_intersection={int(viewport.plane_intersection)} "
                 f"poly_n={len(viewport.uv_polygon)} "
+                f"gaze_hit={int(viewport.gaze_hit)} "
+                f"gaze_uv=({viewport.gaze_uv[0]:.3f},{viewport.gaze_uv[1]:.3f}) "
                 f"erp_frustum={int(viewport.erp_frustum_valid)} "
                 f"north_pole={int(viewport.contains_north_pole)} "
                 f"south_pole={int(viewport.contains_south_pole)}"

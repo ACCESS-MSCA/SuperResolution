@@ -25,8 +25,11 @@ from ffmpeg import decode_audio_to_array, probe_video, read_exact, start_video_d
 from integrations.unity import UnityTransformLogHandler, UnityViewportMetadata, UnityViewportStateHandler
 from utils import draw_square, make_sender
 
-_ERP_DIRECTION_GRID_CACHE: dict[tuple[int, int], np.ndarray] = {}
-_ERP_ROI_MASK_CACHE: dict[tuple[int, int, int], tuple[np.ndarray, np.ndarray]] = {}
+_ERP_ROI_MASK_CACHE: dict[tuple, np.ndarray] = {}
+_ROI_POLYGON_MASK_CACHE: dict[tuple, np.ndarray] = {}
+_GAZE_MARKER_RADIUS_PIXELS = 12
+_GAZE_MARKER_THICKNESS_PIXELS = 3
+_ERP_FRUSTUM_EDGE_SAMPLES = 96
 
 
 def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples: int) -> None:
@@ -40,19 +43,25 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
-def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
+def _clip_polygon_rect(
+    poly: list[tuple[float, float]],
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+) -> list[tuple[float, float]]:
     def clip_left(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
         if not points:
             return []
         out: list[tuple[float, float]] = []
         prev = points[-1]
-        prev_in = prev[0] >= 0.0
+        prev_in = prev[0] >= x_min
         for cur in points:
-            cur_in = cur[0] >= 0.0
+            cur_in = cur[0] >= x_min
             if cur_in != prev_in:
                 dx = cur[0] - prev[0]
-                t = 0.0 if abs(dx) < 1e-8 else (0.0 - prev[0]) / dx
-                out.append((0.0, prev[1] + t * (cur[1] - prev[1])))
+                t = 0.0 if abs(dx) < 1e-8 else (x_min - prev[0]) / dx
+                out.append((x_min, prev[1] + t * (cur[1] - prev[1])))
             if cur_in:
                 out.append(cur)
             prev, prev_in = cur, cur_in
@@ -63,13 +72,13 @@ def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[flo
             return []
         out: list[tuple[float, float]] = []
         prev = points[-1]
-        prev_in = prev[0] <= 1.0
+        prev_in = prev[0] <= x_max
         for cur in points:
-            cur_in = cur[0] <= 1.0
+            cur_in = cur[0] <= x_max
             if cur_in != prev_in:
                 dx = cur[0] - prev[0]
-                t = 0.0 if abs(dx) < 1e-8 else (1.0 - prev[0]) / dx
-                out.append((1.0, prev[1] + t * (cur[1] - prev[1])))
+                t = 0.0 if abs(dx) < 1e-8 else (x_max - prev[0]) / dx
+                out.append((x_max, prev[1] + t * (cur[1] - prev[1])))
             if cur_in:
                 out.append(cur)
             prev, prev_in = cur, cur_in
@@ -80,13 +89,13 @@ def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[flo
             return []
         out: list[tuple[float, float]] = []
         prev = points[-1]
-        prev_in = prev[1] >= 0.0
+        prev_in = prev[1] >= y_min
         for cur in points:
-            cur_in = cur[1] >= 0.0
+            cur_in = cur[1] >= y_min
             if cur_in != prev_in:
                 dy = cur[1] - prev[1]
-                t = 0.0 if abs(dy) < 1e-8 else (0.0 - prev[1]) / dy
-                out.append((prev[0] + t * (cur[0] - prev[0]), 0.0))
+                t = 0.0 if abs(dy) < 1e-8 else (y_min - prev[1]) / dy
+                out.append((prev[0] + t * (cur[0] - prev[0]), y_min))
             if cur_in:
                 out.append(cur)
             prev, prev_in = cur, cur_in
@@ -97,13 +106,13 @@ def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[flo
             return []
         out: list[tuple[float, float]] = []
         prev = points[-1]
-        prev_in = prev[1] <= 1.0
+        prev_in = prev[1] <= y_max
         for cur in points:
-            cur_in = cur[1] <= 1.0
+            cur_in = cur[1] <= y_max
             if cur_in != prev_in:
                 dy = cur[1] - prev[1]
-                t = 0.0 if abs(dy) < 1e-8 else (1.0 - prev[1]) / dy
-                out.append((prev[0] + t * (cur[0] - prev[0]), 1.0))
+                t = 0.0 if abs(dy) < 1e-8 else (y_max - prev[1]) / dy
+                out.append((prev[0] + t * (cur[0] - prev[0]), y_max))
             if cur_in:
                 out.append(cur)
             prev, prev_in = cur, cur_in
@@ -114,6 +123,10 @@ def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[flo
     clipped = clip_bottom(clipped)
     clipped = clip_top(clipped)
     return clipped
+
+
+def _clip_polygon_unit_square(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    return _clip_polygon_rect(poly, 0.0, 1.0, 0.0, 1.0)
 
 
 def _order_polygon_ccw(poly: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -155,183 +168,302 @@ def _unwrap_polygon_u(poly: list[tuple[float, float]]) -> list[tuple[float, floa
     return out
 
 
-def _fill_polygon(frame_bgra: np.ndarray, pts: list[tuple[int, int]], color: np.ndarray, alpha: float) -> None:
-    if len(pts) < 3:
+def _rasterize_polyline_outline(mask: np.ndarray, pts: list[tuple[int, int]], thickness: int, closed: bool = False) -> None:
+    if len(pts) < 2:
         return
 
-    height, width = frame_bgra.shape[0], frame_bgra.shape[1]
-    y_min = max(0, min(p[1] for p in pts))
-    y_max = min(height - 1, max(p[1] for p in pts))
-    if y_min > y_max:
-        return
-
-    blend = max(0.0, min(1.0, float(alpha)))
-    if blend <= 0.0:
-        return
-
-    src_rgb = color[:3].astype(np.float32)
-    for y in range(y_min, y_max + 1):
-        intersections: list[float] = []
-        for i in range(len(pts)):
-            x0, y0 = pts[i]
-            x1, y1 = pts[(i + 1) % len(pts)]
-            if y0 == y1:
-                continue
-
-            if (y >= min(y0, y1)) and (y < max(y0, y1)):
-                t = (y - y0) / (y1 - y0)
-                intersections.append(x0 + t * (x1 - x0))
-
-        if len(intersections) < 2:
-            continue
-
-        intersections.sort()
-        for i in range(0, len(intersections) - 1, 2):
-            x_min = max(0, int(np.ceil(intersections[i])))
-            x_max = min(width - 1, int(np.floor(intersections[i + 1])))
-            if x_min > x_max:
-                continue
-
-            dst = frame_bgra[y, x_min:x_max + 1, :3].astype(np.float32)
-            frame_bgra[y, x_min:x_max + 1, :3] = (dst * (1.0 - blend) + src_rgb * blend).astype(np.uint8)
-            frame_bgra[y, x_min:x_max + 1, 3] = 255
+    height, width = mask.shape
+    t = max(1, int(thickness))
+    segment_count = len(pts) if closed else len(pts) - 1
+    for i in range(segment_count):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % len(pts)]
+        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+        xs = np.rint(np.linspace(x0, x1, steps + 1)).astype(np.int32)
+        ys = np.rint(np.linspace(y0, y1, steps + 1)).astype(np.int32)
+        for x, y in zip(xs, ys):
+            x_min = max(0, int(x) - t // 2)
+            x_max = min(width, int(x) + (t + 1) // 2)
+            y_min = max(0, int(y) - t // 2)
+            y_max = min(height, int(y) + (t + 1) // 2)
+            mask[y_min:y_max, x_min:x_max] = True
 
 
-def _get_erp_direction_grid(width: int, height: int) -> np.ndarray:
-    key = (width, height)
-    cached = _ERP_DIRECTION_GRID_CACHE.get(key)
-    if cached is not None:
-        return cached
+def _rasterize_polygon_outline(mask: np.ndarray, pts: list[tuple[int, int]], thickness: int) -> None:
+    _rasterize_polyline_outline(mask, pts, thickness, closed=True)
 
-    u = np.linspace(0.0, 1.0, width, dtype=np.float32)
-    v = np.linspace(1.0, 0.0, height, dtype=np.float32)
-    yaw = (u - 0.5) * (2.0 * np.pi)
-    pitch = (v - 0.5) * np.pi
-    sin_yaw = np.sin(yaw).astype(np.float32)
-    cos_yaw = np.cos(yaw).astype(np.float32)
-    sin_pitch = np.sin(pitch).astype(np.float32)
-    cos_pitch = np.cos(pitch).astype(np.float32)[:, None]
 
-    directions = np.empty((height, width, 3), dtype=np.float32)
-    directions[..., 0] = cos_pitch * sin_yaw[None, :]
-    directions[..., 1] = sin_pitch[:, None]
-    directions[..., 2] = cos_pitch * cos_yaw[None, :]
-    _ERP_DIRECTION_GRID_CACHE[key] = directions
-    return directions
+def _apply_edge_mask(frame_bgra: np.ndarray, edge_mask: np.ndarray, color: np.ndarray) -> None:
+    frame_bgra[edge_mask] = color
+
+
+def _normalize_vector(value: np.ndarray) -> np.ndarray | None:
+    length = float(np.linalg.norm(value))
+    if length < 1e-6 or not np.isfinite(length):
+        return None
+    return value / length
+
+
+def _slerp_direction(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    if dot > 0.9995:
+        blended = a + (b - a) * t
+        normalized = _normalize_vector(blended)
+        return a if normalized is None else normalized
+
+    theta = np.arccos(dot)
+    sin_theta = np.sin(theta)
+    if abs(float(sin_theta)) < 1e-6:
+        return a
+
+    return (
+        np.sin((1.0 - t) * theta) / sin_theta * a
+        + np.sin(t * theta) / sin_theta * b
+    )
+
+
+def _direction_to_erp_uv(direction: np.ndarray) -> tuple[float, float]:
+    x, y, z = (float(direction[0]), float(direction[1]), float(direction[2]))
+    yaw = np.arctan2(x, z)
+    pitch = np.arcsin(max(-1.0, min(1.0, y)))
+    u = (0.5 + yaw / (2.0 * np.pi)) % 1.0
+    v = max(0.0, min(1.0, 0.5 + pitch / np.pi))
+    return float(u), float(v)
+
+
+def _split_erp_polyline_at_seam(points: list[tuple[float, float]]) -> list[list[tuple[float, float]]]:
+    if len(points) < 2:
+        return []
+
+    segments: list[list[tuple[float, float]]] = [[points[0]]]
+    previous_u, previous_v = points[0]
+
+    for current_u, current_v in points[1:]:
+        delta_u = current_u - previous_u
+        if delta_u < -0.5:
+            adjusted_u = current_u + 1.0
+            factor = (1.0 - previous_u) / max(1e-6, adjusted_u - previous_u)
+            seam_v = previous_v + factor * (current_v - previous_v)
+            segments[-1].append((1.0, seam_v))
+            segments.append([(0.0, seam_v), (current_u, current_v)])
+        elif delta_u > 0.5:
+            adjusted_u = current_u - 1.0
+            factor = (0.0 - previous_u) / min(-1e-6, adjusted_u - previous_u)
+            seam_v = previous_v + factor * (current_v - previous_v)
+            segments[-1].append((0.0, seam_v))
+            segments.append([(1.0, seam_v), (current_u, current_v)])
+        else:
+            segments[-1].append((current_u, current_v))
+
+        previous_u, previous_v = current_u, current_v
+
+    return [segment for segment in segments if len(segment) >= 2]
 
 
 def _draw_equirectangular_frustum_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int, color: np.ndarray) -> bool:
     height, width = frame_bgra.shape[0], frame_bgra.shape[1]
-    cache_key = (width, height, viewport.sequence)
-    cached = _ERP_ROI_MASK_CACHE.get(cache_key)
-    if cached is not None:
-        mask, edge = cached
-    else:
-        normals = np.asarray(viewport.erp_edge_normals, dtype=np.float32)
-        if normals.shape != (4, 3):
-            return False
-
-        lengths = np.linalg.norm(normals, axis=1)
-        if np.any(lengths < 1e-6):
-            return False
-
-        normals = normals / lengths[:, None]
-        directions = _get_erp_direction_grid(width, height)
-        dots = np.tensordot(directions, normals, axes=([2], [1]))
-        mask = np.all(dots >= -1e-5, axis=2)
-        if not np.any(mask):
-            return False
-
-        edge = np.zeros_like(mask)
-        vertical = mask[1:, :] ^ mask[:-1, :]
-        edge[1:, :] |= vertical
-        edge[:-1, :] |= vertical
-        edge |= mask ^ np.roll(mask, 1, axis=1)
-        edge |= mask ^ np.roll(mask, -1, axis=1)
-
-        _ERP_ROI_MASK_CACHE.clear()
-        _ERP_ROI_MASK_CACHE[cache_key] = (mask, edge)
-
-    src_rgb = color[:3].astype(np.float32)
-    dst = frame_bgra[..., :3].astype(np.float32)
-    dst[mask] = dst[mask] * 0.82 + src_rgb * 0.18
-    frame_bgra[..., :3] = dst.astype(np.uint8)
-    frame_bgra[..., 3] = 255
+    if height < 2 or width < 2:
+        return False
 
     t = max(1, int(thickness))
-    if t > 1:
-        expanded = edge.copy()
-        radius = max(1, t // 2)
-        for offset in range(1, radius + 1):
-            expanded |= np.roll(edge, offset, axis=0)
-            expanded |= np.roll(edge, -offset, axis=0)
-            expanded |= np.roll(edge, offset, axis=1)
-            expanded |= np.roll(edge, -offset, axis=1)
-        edge = expanded
+    corners = np.asarray(viewport.erp_corner_directions, dtype=np.float32)
+    if corners.shape != (4, 3):
+        return False
 
-    frame_bgra[edge] = color
+    normalized_corners: list[np.ndarray] = []
+    for corner in corners:
+        normalized = _normalize_vector(corner)
+        if normalized is None:
+            return False
+        normalized_corners.append(normalized)
+
+    corner_key = tuple(tuple(round(float(component), 6) for component in corner) for corner in normalized_corners)
+    cache_key = (width, height, viewport.sequence, t, _ERP_FRUSTUM_EDGE_SAMPLES, corner_key)
+    cached = _ERP_ROI_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        edge_full = cached
+    else:
+        edge_full = np.zeros((height, width), dtype=bool)
+        samples = max(8, int(_ERP_FRUSTUM_EDGE_SAMPLES))
+
+        for edge_index in range(4):
+            start = normalized_corners[edge_index]
+            end = normalized_corners[(edge_index + 1) & 3]
+            uv_points = [
+                _direction_to_erp_uv(_slerp_direction(start, end, i / samples))
+                for i in range(samples + 1)
+            ]
+
+            for segment in _split_erp_polyline_at_seam(uv_points):
+                pts = [
+                    (
+                        int(round(_clamp01(u) * (width - 1))),
+                        int(round((1.0 - _clamp01(v)) * (height - 1))),
+                    )
+                    for u, v in segment
+                ]
+                _rasterize_polyline_outline(edge_full, pts, t, closed=False)
+
+        if not np.any(edge_full):
+            return False
+        _ERP_ROI_MASK_CACHE.clear()
+        _ERP_ROI_MASK_CACHE[cache_key] = edge_full
+
+    _apply_edge_mask(frame_bgra, edge_full, color)
     return True
 
 
-def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int = 4) -> None:
-    if not viewport.plane_intersection:
+def _draw_gaze_hit_marker(frame_bgra: np.ndarray, viewport: UnityViewportMetadata) -> None:
+    if not viewport.gaze_hit:
+        return
+
+    u, v = viewport.gaze_uv
+    if not (np.isfinite(u) and np.isfinite(v)):
+        return
+    if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
         return
 
     height, width = frame_bgra.shape[0], frame_bgra.shape[1]
     if height < 2 or width < 2:
         return
 
+    x = int(round(u * (width - 1)))
+    y = int(round((1.0 - v) * (height - 1)))
+    radius = min(_GAZE_MARKER_RADIUS_PIXELS, max(2, min(width, height) // 8))
+    thickness = max(1, _GAZE_MARKER_THICKNESS_PIXELS)
+    shadow = np.array([0, 0, 0, 255], dtype=np.uint8)
+    color = np.array([0, 255, 255, 255], dtype=np.uint8)  # BGRA yellow.
+
+    def draw_cross(c: np.ndarray, r: int, t: int) -> None:
+        half = max(0, t // 2)
+        x0 = max(0, x - r)
+        x1 = min(width, x + r + 1)
+        y0 = max(0, y - half)
+        y1 = min(height, y + half + 1)
+        frame_bgra[y0:y1, x0:x1] = c
+
+        x0 = max(0, x - half)
+        x1 = min(width, x + half + 1)
+        y0 = max(0, y - r)
+        y1 = min(height, y + r + 1)
+        frame_bgra[y0:y1, x0:x1] = c
+
+    draw_cross(shadow, radius + 1, thickness + 2)
+    draw_cross(color, radius, thickness)
+
+
+def _draw_uv_polygon_roi(
+    frame_bgra: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int,
+    color: np.ndarray,
+    is_equirectangular: bool,
+) -> bool:
+    height, width = frame_bgra.shape[0], frame_bgra.shape[1]
+    if height < 2 or width < 2:
+        return False
+
     corners = list(viewport.uv_polygon)
     if len(corners) < 3:
-        return
+        return False
 
-    # BGRA red
-    color = np.array([0, 0, 255, 255], dtype=np.uint8)
     t = max(1, int(thickness))
-
-    is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
-    if is_equirectangular and viewport.erp_frustum_valid:
-        if _draw_equirectangular_frustum_roi(frame_bgra, viewport, t, color):
-            return
+    polygon_key = tuple((round(float(u), 6), round(float(v), 6)) for u, v in corners)
+    cache_key = (
+        width,
+        height,
+        viewport.sequence,
+        t,
+        is_equirectangular,
+        viewport.contains_north_pole,
+        viewport.contains_south_pole,
+        polygon_key,
+    )
+    cached = _ROI_POLYGON_MASK_CACHE.get(cache_key)
+    if cached is not None:
+        _apply_edge_mask(frame_bgra, cached, color)
+        return True
 
     ordered = _unwrap_polygon_u(corners) if is_equirectangular else corners
-    u_shifts = (-1.0, 0.0, 1.0) if is_equirectangular else (0.0,)
+    drew_any = False
+    edge_mask = np.zeros((height, width), dtype=bool)
 
-    for u_shift in u_shifts:
-        shifted = [(u + u_shift, v) for u, v in ordered]
+    if is_equirectangular:
+        u_min = min(u for u, _ in ordered)
+        u_max = max(u for u, _ in ordered)
+        tile_min = int(np.floor(u_min))
+        tile_max = int(np.floor(u_max))
+        if abs(u_max - tile_max) < 1e-6:
+            tile_max -= 1
+        tile_max = max(tile_min, tile_max)
+        tile_ranges = [(float(tile), float(tile + 1)) for tile in range(tile_min, tile_max + 1)]
+    else:
+        tile_ranges = [(0.0, 1.0)]
+
+    for tile_left, tile_right in tile_ranges:
+        polygon = ordered
         if is_equirectangular and viewport.contains_north_pole and not viewport.contains_south_pole:
-            shifted = shifted + [(shifted[-1][0], 1.0), (1.0, 1.0), (0.0, 1.0), (shifted[0][0], 1.0)]
+            polygon = ordered + [
+                (ordered[-1][0], 1.0),
+                (tile_right, 1.0),
+                (tile_left, 1.0),
+                (ordered[0][0], 1.0),
+            ]
         elif is_equirectangular and viewport.contains_south_pole and not viewport.contains_north_pole:
-            shifted = shifted + [(shifted[-1][0], 0.0), (1.0, 0.0), (0.0, 0.0), (shifted[0][0], 0.0)]
+            polygon = ordered + [
+                (ordered[-1][0], 0.0),
+                (tile_right, 0.0),
+                (tile_left, 0.0),
+                (ordered[0][0], 0.0),
+            ]
 
-        clipped = _clip_polygon_unit_square(shifted)
+        clipped = _clip_polygon_rect(polygon, tile_left, tile_right, 0.0, 1.0) if is_equirectangular else _clip_polygon_unit_square(polygon)
         if len(clipped) < 3:
             continue
 
         pts = []
         for u, v in clipped:
-            x = int(round(_clamp01(u) * (width - 1)))
+            draw_u = (u - tile_left) if is_equirectangular else _clamp01(u)
+            x = int(round(_clamp01(draw_u) * (width - 1)))
             y = int(round((1.0 - _clamp01(v)) * (height - 1)))
             pts.append((x, y))
 
         if len(pts) < 3:
             continue
 
-        _fill_polygon(frame_bgra, pts, color, alpha=0.18)
+        drew_any = True
+        _rasterize_polygon_outline(edge_mask, pts, t)
 
-        for i in range(len(pts)):
-            x0, y0 = pts[i]
-            x1, y1 = pts[(i + 1) % len(pts)]
-            steps = max(abs(x1 - x0), abs(y1 - y0), 1)
-            for s in range(steps + 1):
-                a = s / steps
-                x = int(round(x0 + (x1 - x0) * a))
-                y = int(round(y0 + (y1 - y0) * a))
-                x_min = max(0, x - t // 2)
-                x_max = min(width, x + (t + 1) // 2)
-                y_min = max(0, y - t // 2)
-                y_max = min(height, y + (t + 1) // 2)
-                frame_bgra[y_min:y_max, x_min:x_max] = color
+    if drew_any:
+        _ROI_POLYGON_MASK_CACHE.clear()
+        _ROI_POLYGON_MASK_CACHE[cache_key] = edge_mask
+        _apply_edge_mask(frame_bgra, edge_mask, color)
+    return drew_any
+
+
+def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, thickness: int = 4) -> None:
+    if not viewport.plane_intersection and not viewport.gaze_hit:
+        return
+
+    # BGRA red
+    color = np.array([0, 0, 255, 255], dtype=np.uint8)
+    t = max(1, int(thickness))
+    is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
+
+    # ERP uses the actual viewport corner directions sent by Unity. Each side
+    # is drawn as a great-circle arc, then split at the equirectangular seam.
+    if is_equirectangular and viewport.erp_frustum_valid:
+        if _draw_equirectangular_frustum_roi(frame_bgra, viewport, t, color):
+            _draw_gaze_hit_marker(frame_bgra, viewport)
+            return
+
+    # Polygon path is the efficient default for planes and the fallback for ERP
+    # if frustum metadata is unavailable.
+    if _draw_uv_polygon_roi(frame_bgra, viewport, t, color, is_equirectangular):
+        _draw_gaze_hit_marker(frame_bgra, viewport)
+        return
+
+    _draw_gaze_hit_marker(frame_bgra, viewport)
 
 
 def stream_video(

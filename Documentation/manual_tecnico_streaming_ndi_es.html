@@ -146,7 +146,7 @@
       <div class="meta">
         <span class="pill">Proyecto: Py_NDI</span>
         <span class="pill">Enfoque: streaming NDI LAN</span>
-        <span class="pill">Última actualización: 2026-05-05</span>
+        <span class="pill">Última actualización: 2026-05-27</span>
       </div>
     </section>
 
@@ -536,17 +536,42 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
 
       <h3>Componentes técnicos</h3>
       <ul>
-        <li>Unity: <code>NdiReceiverMetadataSender</code>, <code>NdiTransformMetadataPayloadProvider</code>, <code>NdiMetadataInterop</code>.</li>
+        <li>Unity: <code>NdiReceiverMetadataSender</code>, <code>NdiTransformMetadataPayloadProvider</code>, <code>NdiHeadViewportMetadataPayloadProvider</code>, <code>NdiMetadataInterop</code>.</li>
         <li>Server: <code>extensions/backchannel/receiver.py</code>, <code>extensions/backchannel/dispatcher.py</code>, <code>integrations/unity/parsers.py</code>, <code>integrations/unity/handlers.py</code> + integración en <code>stream_video.py</code>.</li>
       </ul>
 
       <h3>Flujo operativo</h3>
       <ol>
-        <li>Unity genera payload XML <code>&lt;access_transform ... /&gt;</code>.</li>
+        <li>Unity genera payload XML como <code>&lt;access_transform ... /&gt;</code>, <code>&lt;access_viewport ... /&gt;</code> o <code>&lt;access_client ... /&gt;</code>.</li>
         <li>Unity envía metadata con <code>NDIlib_recv_send_metadata</code>.</li>
         <li>El sender Python captura metadata entrante con <code>NDIlib_send_capture</code>.</li>
-        <li>El server parsea XML, extrae transform y emite logs de recepción.</li>
+        <li>El server parsea XML, actualiza el estado más reciente y dibuja overlays de debug sobre el frame NDI antes de enviarlo.</li>
       </ol>
+
+      <h3>Contrato <code>access_viewport</code> alineado con Unity</h3>
+      <p>Unity/AVP calcula la matemática 3D localmente porque conoce cámara, cabeza, collider y orientación de la superficie. Python no hace raycasts contra Unity: recibe una descripción compacta en coordenadas de textura NDI y la convierte a píxeles del frame que está emitiendo.</p>
+      <ul>
+        <li><code>uv_projection</code>: modo de proyección de la superficie (<code>MeshTextureCoordinates</code>, <code>EquirectangularSphere</code>, etc.).</li>
+        <li><code>uv_poly_n</code> + <code>uv_poly{i}_x/y</code>: polígono visible del viewport en UV normalizadas <code>[0..1]</code>.</li>
+        <li><code>gaze_hit</code>: <code>1</code> si el rayo central de la cámara corta directamente la superficie NDI.</li>
+        <li><code>gaze_uv_x/y</code>: punto exacto de mirada en UV. Usar solo si <code>gaze_hit=1</code>.</li>
+        <li><code>gaze_world_x/y/z</code>: punto de mundo del corte central si Unity lo incluye.</li>
+        <li><code>uv_cx/uv_cy</code>: centro útil del ROI mantenido por compatibilidad; puede ser centroide/fallback, no debe usarse como punto preciso de mirada.</li>
+        <li><code>erp_frustum_valid</code> + <code>erp_corner{i}_x/y/z</code>: direcciones normalizadas de las cuatro esquinas del viewport en esfera/media esfera equirectangular.</li>
+        <li><code>erp_edge{i}_nx/ny/nz</code>: planos laterales del frustum, mantenidos para consumidores avanzados y fallback/debug.</li>
+        <li><code>uv_contains_north_pole</code> / <code>uv_contains_south_pole</code>: flags de polos para resolver regiones ERP.</li>
+        <li><code>seq</code>: número de secuencia; Python lo usa para evitar repetir trabajo si la metadata no cambió, especialmente en fallbacks caros.</li>
+      </ul>
+
+      <h3>Cómo Python dibuja el feedback visual</h3>
+      <ul>
+        <li>Plano: convierte UV a píxel con <code>x = round(u * (width - 1))</code> y <code>y = round((1 - v) * (height - 1))</code>, invirtiendo <code>v</code> porque la imagen empieza arriba.</li>
+        <li>ROI plano: <code>stream_video.py</code> dibuja solo el contorno rojo desde <code>uv_polygon</code>.</li>
+        <li>Hit marker: si <code>gaze_hit=1</code>, dibuja un <code>+</code> amarillo en <code>gaze_uv_x/y</code>. Es coste constante: dos rectángulos finos sobre el frame.</li>
+        <li>ERP: el camino principal traza las aristas reales del frustum. Python interpola cada par de <code>erp_corner</code> con <code>slerp</code>, convierte las muestras a UV equirectangular y parte la polilínea al cruzar la costura <code>u=0/1</code>. <code>uv_polygon</code> queda como fallback/debug.</li>
+        <li>Rendimiento: no se pinta nunca el interior, ni en plano ni en ERP. Las máscaras de contorno se cachean por resolución, <code>seq</code>, grosor y polígono/esquinas ERP. Los logs de viewport están limitados en frecuencia para no convertir stdout en cuello de botella.</li>
+        <li>Caducidad: si no llega metadata fresca durante <code>viewport_stale_timeout_seconds</code>, Python deja de dibujar overlay y el frame vuelve limpio.</li>
+      </ul>
 
       <h3>CLI y logging (server)</h3>
       <ul>
@@ -561,6 +586,7 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
       <ul>
         <li><code>[RX-META]</code>: XML recibido.</li>
         <li><code>[RX Transform]</code>: transform parseado correctamente.</li>
+        <li><code>[RX Viewport]</code>: ROI/gaze parseado correctamente. Incluye <code>poly_n</code>, <code>gaze_hit</code>, <code>gaze_uv</code> y estado ERP.</li>
         <li><code>cap_meta</code> en resumen final: frames metadata capturados por <code>send_capture</code>.</li>
         <li><code>received</code>: mensajes válidos parseados y encolados.</li>
       </ul>
@@ -571,7 +597,8 @@ python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
       <h3>Estado validado</h3>
       <ul>
         <li>Validado en flujo real Unity Editor -&gt; server Python.</li>
-        <li>Recepción confirmada de <code>access_client</code> y <code>access_transform</code>.</li>
+        <li>Recepción confirmada de <code>access_client</code>, <code>access_transform</code> y <code>access_viewport</code>.</li>
+        <li>Feedback visual confirmado: contorno ROI rojo y hit marker <code>+</code> de mirada.</li>
       </ul>
     </section>
 
