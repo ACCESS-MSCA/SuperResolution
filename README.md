@@ -386,6 +386,10 @@ Keep the base project as an NDI A/V streamer (core) and move the return channel 
 
 To avoid manual terminal startup, double-click launchers were added:
 
+- `Launchers/Apps/Stream NDI Default.app`
+  - One-click Finder launcher for the default profile.
+- `Launchers/Apps/Stream NDI LowRes WAN.app`
+  - One-click Finder launcher for the lowres WAN profile.
 - `Launchers/Stream_NDI_Default.command`
   - Starts the default profile (`Videos/big_buck_bunny.mp4`).
   - Metadata return channel enabled (does not use `--no-rx-metadata`).
@@ -393,12 +397,8 @@ To avoid manual terminal startup, double-click launchers were added:
   - Starts the lowres WAN profile (`Videos/test_360p24.mp4`).
   - Auto-generates the lowres asset with `ffmpeg` if missing.
   - Metadata return channel enabled.
-- `Launchers/Create_Launcher_Apps.command`
-  - Generates Finder apps in `Launchers/Apps/`:
-    - `Stream NDI Default.app`
-    - `Stream NDI LowRes WAN.app`
 
 Recommended usage:
 
-1. Double-click the `.app` icon (or `.command` for direct terminal launch).
+1. Double-click the `.app` icon for the profile you want.
 2. Stop streaming with `Ctrl+C` in the launcher Terminal window.
