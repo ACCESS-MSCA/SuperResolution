@@ -76,14 +76,12 @@ def probe_video(video_path: str):
 
 
 def start_video_decoder(video_path: str):
-    """Start ffmpeg process that loops video forever and outputs raw BGRA frames."""
+    """Start ffmpeg process that outputs raw BGRA frames for a single media pass."""
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-stream_loop",
-        "-1",
         "-i",
         video_path,
         "-an",

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decisión de Arquitectura: Sender A/V directo con libndi</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #4b5563;
+      --accent: #0b5c8c;
+      --line: #d7dee8;
+      --codebg: #f8fafc;
+      --warn: #8a3b12;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.55;
+    }
+    .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 4px 14px rgba(15, 23, 42, .05);
+    }
+    h1 { margin: 0 0 12px; color: var(--accent); }
+    h2 { margin: 18px 0 8px; color: #12425e; font-size: 1.1rem; }
+    ul, ol { margin: 8px 0 8px 18px; }
+    code {
+      background: var(--codebg);
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .92em;
+    }
+    .note { color: var(--muted); }
+    .warn {
+      border: 1px solid #f5c097;
+      background: #fff9f5;
+      color: var(--warn);
+      border-radius: 10px;
+      padding: 10px;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Decisión de Arquitectura: Sender A/V directo con <code>libndi</code></h1>
+      <p class="note"><strong>Actualizado:</strong> 2026-06-17</p>
+      <p class="note"><strong>Estado:</strong> implementado en código, pendiente de validación larga definitiva.</p>
+      <p class="note">
+        <strong>Navegación:</strong>
+        <a href="../manual_tecnico_streaming_ndi_es.html">Manual core ES</a> ·
+        <a href="../technical_manual_streaming_ndi_en.html">Manual core EN</a> ·
+        <a href="./ndi_sender_libndi_decision_en.html">Versión EN</a>
+      </p>
+
+      <h2>1. Contexto</h2>
+      <p>Tras pruebas largas, el sender Python presentaba una deriva A/V sistemática: después de unos 20-30 minutos, el audio acababa retrasado entre 1 y 2 segundos respecto al vídeo. El comportamiento se reproducía tanto en Unity como en NDI Monitor, así que el problema dejó de apuntar principalmente al receiver Unity.</p>
+
+      <h2>2. Arquitectura anterior</h2>
+      <p>El sender A/V usaba <code>cyndilib</code> como wrapper de alto nivel sobre NDI. El resto del pipeline ya era relativamente directo: <code>ffprobe</code> para metadata, <code>ffmpeg</code> para decode, <code>numpy</code> para buffers/overlays y un backchannel de metadata muy cercano a <code>libndi</code> vía <code>ctypes</code>.</p>
+
+      <h2>3. Qué se intentó antes de cambiar la base</h2>
+      <ol>
+        <li>pacing manual con reloj monotónico,</li>
+        <li>ventanas exactas de audio por frame,</li>
+        <li>control manual del loop de vídeo,</li>
+        <li>timestamps y timecodes explícitos,</li>
+        <li>ajustes de clocks de NDI,</li>
+        <li>combinaciones de clocks internos y externos.</li>
+      </ol>
+      <p>Ninguna de esas variantes eliminó la deriva larga de forma fiable.</p>
+
+      <h2>4. Decisión tomada</h2>
+      <p>Se sustituye el sender A/V de alto nivel basado en <code>cyndilib</code> por un sender mínimo directo sobre <code>libndi</code>.</p>
+      <p>La migración es acotada: no reescribe el pipeline completo. Se mantiene decode, overlays, metadata y backchannel; cambia únicamente la capa de envío A/V.</p>
+
+      <h2>5. Qué ganamos</h2>
+      <ul>
+        <li>control explícito de <code>NDIlib_send_create_t</code>, <code>NDIlib_video_frame_v2_t</code> y <code>NDIlib_audio_frame_v3_t</code>,</li>
+        <li>menos buffering implícito del wrapper,</li>
+        <li>menos comportamiento opaco en el camino crítico,</li>
+        <li>mejor capacidad de instrumentación y depuración,</li>
+        <li>una dependencia Python menos en runtime obligatorio.</li>
+      </ul>
+
+      <h2>6. Qué perdemos</h2>
+      <ul>
+        <li>comodidad de abstracciones de alto nivel,</li>
+        <li>más responsabilidad sobre structs, lifecycle y compatibilidad nativa,</li>
+        <li>más necesidad de QA prolongado y multiplataforma.</li>
+      </ul>
+
+      <h2>7. Alcance exacto del cambio</h2>
+      <ul>
+        <li><code>ndi_native.py</code>: runtime y sender directo <code>libndi</code>.</li>
+        <li><code>utils.py</code>: fábrica del sender nativo.</li>
+        <li><code>stream_video.py</code>: orquestación A/V actualizada.</li>
+        <li><code>extensions/backchannel/receiver.py</code>: compatibilidad con sender nativo o legacy.</li>
+        <li><code>requirements.txt</code>: dependencia Python obligatoria reducida a <code>numpy</code>.</li>
+      </ul>
+
+      <h2>8. Estado de dependencias</h2>
+      <p><strong>Obligatorias:</strong> <code>numpy==2.3.5</code>, <code>ffmpeg</code>, <code>ffprobe</code>, <code>libndi</code>.</p>
+      <p><strong>Opcional/legacy:</strong> <code>cyndilib</code> deja de ser necesario para el sender A/V. Puede seguir instalado como fallback o para comparar comportamiento legacy.</p>
+
+      <h2>9. Versiones observadas</h2>
+      <ul>
+        <li>Python: <code>3.11.0</code></li>
+        <li>NumPy: <code>2.3.5</code></li>
+        <li>FFmpeg / FFprobe: <code>8.1</code></li>
+        <li>NDI runtime detectado: <code>NDI SDK APPLE 6.2.1.0</code></li>
+      </ul>
+
+      <h2>10. Riesgos abiertos</h2>
+      <ul>
+        <li>que la deriva persista incluso con sender directo,</li>
+        <li>que haya diferencias entre macOS, NDI Monitor y otros receivers,</li>
+        <li>que el problema real esté en timing del media o segmentación del audio.</li>
+      </ul>
+
+      <div class="warn">
+        <strong>Lectura correcta de la decisión:</strong> pasar a <code>libndi</code> directo reduce una gran fuente de incertidumbre, pero no garantiza por sí solo que la deriva desaparezca. El objetivo es aislar la causa real con una arquitectura más transparente.
+      </div>
+
+      <h2>11. Criterio de éxito</h2>
+      <ol>
+        <li>stream estable durante al menos 30-60 minutos,</li>
+        <li>sin deriva audible significativa en NDI Monitor,</li>
+        <li>sin deriva equivalente en Unity,</li>
+        <li>comportamiento consistente a 24, 23.976, 60 y 59.94 fps,</li>
+        <li>funcionamiento correcto con y sin audio.</li>
+      </ol>
+
+      <h2>12. Siguiente paso</h2>
+      <p>Validar primero en NDI Monitor y luego en Unity. Si la deriva persiste con <code>libndi</code> directo, la investigación debe moverse fuera del wrapper y centrarse en timing del media, segmentación audio por frame o comportamiento largo del runtime NDI.</p>
+    </section>
+  </div>
+</body>
+</html>

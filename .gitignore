@@ -4,4 +4,5 @@ __pycache__/
 .idea/
 *.mp4
 *.md
+!Documentation/**/*.md
 .DS_Store

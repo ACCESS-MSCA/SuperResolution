@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import queue
 import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional
 
-import cyndilib
-from cyndilib.sender import Sender
+try:
+    from cyndilib.sender import Sender as CyndilibSender
+except Exception:
+    CyndilibSender = None
+
+from ndi_native import NDIlib_metadata_frame_t, get_ndi_runtime
 
 
 NDI_FRAME_TYPE_NONE = 0
@@ -32,14 +34,6 @@ class _NdiSendCreate(ctypes.Structure):
     ]
 
 
-class _NdiMetadataFrame(ctypes.Structure):
-    _fields_ = [
-        ("length", ctypes.c_int),
-        ("timecode", ctypes.c_int64),
-        ("p_data", ctypes.c_void_p),
-    ]
-
-
 class _CyndilibSenderLayout(ctypes.Structure):
     # Mirrors cyndilib's generated C struct layout for Sender (cyndilib 0.1.1).
     _fields_ = [
@@ -53,57 +47,10 @@ class _CyndilibSenderLayout(ctypes.Structure):
 
 class _NdiSendApi:
     def __init__(self):
-        self._lib = self._load_lib()
-
-        self._lib.NDIlib_send_capture.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_NdiMetadataFrame),
-            ctypes.c_uint32,
-        ]
-        self._lib.NDIlib_send_capture.restype = ctypes.c_int
-
-        self._lib.NDIlib_send_free_metadata.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_NdiMetadataFrame),
-        ]
-        self._lib.NDIlib_send_free_metadata.restype = None
-
-    def _load_lib(self):
-        candidates: List[str] = []
-
-        bundled = Path(cyndilib.__file__).resolve().parent / ".dylibs" / "libndi.dylib"
-        if bundled.exists():
-            candidates.append(str(bundled))
-
-        for name in ("libndi", "ndi", "libndi.dylib", "Processing.NDI.Lib.x64"):
-            found = ctypes.util.find_library(name)
-            if found:
-                candidates.append(found)
-
-        candidates.extend([
-            "libndi.dylib",
-            "libndi",
-            "ndi",
-            "Processing.NDI.Lib.x64",
-        ])
-
-        seen = set()
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            try:
-                return ctypes.CDLL(candidate)
-            except OSError:
-                continue
-
-        raise RuntimeError(
-            "Could not load NDI runtime library. "
-            "Install NDI runtime or ensure cyndilib bundled libndi is available."
-        )
+        self._lib = get_ndi_runtime().lib
 
     def capture_metadata(self, sender_ptr: int, timeout_ms: int) -> tuple[int, Optional[str], int]:
-        frame = _NdiMetadataFrame()
+        frame = NDIlib_metadata_frame_t()
         sender_handle = ctypes.c_void_p(sender_ptr)
 
         frame_type = int(self._lib.NDIlib_send_capture(sender_handle, ctypes.byref(frame), int(timeout_ms)))
@@ -136,13 +83,17 @@ class NdiMetadataMessage:
     received_at: float
 
 
-def _sender_instance_ptr(sender: Sender) -> int:
-    if not isinstance(sender, Sender):
-        raise TypeError("sender must be a cyndilib.sender.Sender")
+def _sender_instance_ptr(sender) -> int:
+    native_ptr = getattr(sender, "native_sender_ptr", 0)
+    if native_ptr:
+        return int(native_ptr)
 
-    obj = _CyndilibSenderLayout.from_address(id(sender))
-    ptr = int(obj.ptr) if obj.ptr else 0
-    return ptr
+    if CyndilibSender is not None and isinstance(sender, CyndilibSender):
+        obj = _CyndilibSenderLayout.from_address(id(sender))
+        ptr = int(obj.ptr) if obj.ptr else 0
+        return ptr
+
+    raise TypeError("sender must expose native_sender_ptr or be a cyndilib.sender.Sender")
 
 
 def _parse_xml_message(xml_payload: str, timecode: int, received_at: float) -> Optional[NdiMetadataMessage]:
@@ -164,7 +115,7 @@ def _parse_xml_message(xml_payload: str, timecode: int, received_at: float) -> O
 class NdiSenderBackchannelReceiver:
     def __init__(
         self,
-        sender: Sender,
+        sender,
         timeout_ms: int = 0,
         idle_sleep_seconds: float = 0.001,
         max_queue_size: int = 2048,
@@ -198,12 +149,14 @@ class NdiSenderBackchannelReceiver:
         if self._thread is not None:
             return
 
-        if not self._sender._running:
+        sender_running = bool(getattr(self._sender, "_running", False))
+        sender_ptr = _sender_instance_ptr(self._sender)
+        if not sender_running and sender_ptr == 0:
             raise RuntimeError("Sender must be opened before starting backchannel receiver.")
 
-        self._sender_ptr = _sender_instance_ptr(self._sender)
+        self._sender_ptr = sender_ptr
         if self._sender_ptr == 0:
-            raise RuntimeError("Could not resolve NDI sender pointer from cyndilib Sender.")
+            raise RuntimeError("Could not resolve NDI sender pointer.")
 
         self._stop_event.clear()
         self._thread = threading.Thread(

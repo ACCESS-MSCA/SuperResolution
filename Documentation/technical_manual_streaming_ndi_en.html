@@ -1,594 +1,142 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Complete Technical Manual - NDI LAN Streaming</title>
+  <title>Technical Manual - SuperResolution NDI Streaming</title>
   <style>
     :root {
-      --bg: #f4f7fb;
-      --card: #ffffff;
-      --ink: #1f2937;
-      --muted: #4b5563;
-      --accent: #0b5c8c;
-      --accent2: #0c7a5f;
-      --line: #d7dee8;
-      --warn: #8a3b12;
-      --codebg: #f8fafc;
+      color-scheme: dark;
+      --bg: #0f1217;
+      --panel: #171b22;
+      --panel-2: #1d2430;
+      --text: #e8eef7;
+      --muted: #a8b3c5;
+      --accent: #78b7ff;
+      --border: #2a3443;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-      line-height: 1.55;
-      background:
-        radial-gradient(circle at 10% 10%, #e6f4ff 0%, transparent 45%),
-        radial-gradient(circle at 90% 0%, #e8fff5 0%, transparent 30%),
-        var(--bg);
-    }
-    .wrap { max-width: 1200px; margin: 24px auto 48px; padding: 0 16px; }
-    .hero {
-      background: linear-gradient(120deg, #0b5c8c, #0c7a5f);
-      color: #fff;
-      border-radius: 16px;
-      padding: 24px;
-      box-shadow: 0 10px 30px rgba(11, 92, 140, .25);
-      margin-bottom: 18px;
-    }
-    .hero h1 { margin: 0 0 8px; font-size: 2rem; }
-    .hero p { margin: 6px 0; opacity: .95; }
-    .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    .pill {
-      border: 1px solid rgba(255,255,255,.35);
-      border-radius: 999px;
-      padding: 4px 10px;
-      font-size: .85rem;
-      background: rgba(255,255,255,.12);
-    }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 18px;
-      margin-bottom: 14px;
-      box-shadow: 0 4px 14px rgba(15, 23, 42, .05);
-    }
-    h2 { margin: 0 0 10px; font-size: 1.35rem; color: var(--accent); }
-    h3 { margin: 16px 0 8px; font-size: 1.05rem; color: #12425e; }
-    p { margin: 8px 0; }
-    ul, ol { margin: 8px 0 8px 18px; }
-    code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: var(--codebg);
-      border: 1px solid #e5e7eb;
-      border-radius: 6px;
-      padding: 1px 6px;
-      font-size: .92em;
-    }
-    pre {
-      background: #0f172a;
-      color: #d1fae5;
-      border-radius: 10px;
-      padding: 12px;
-      overflow: auto;
-      border: 1px solid #1e293b;
-      font-size: .9rem;
-    }
-    .warn {
-      border: 1px solid #f5c097;
-      background: #fff9f5;
-      color: var(--warn);
-      border-radius: 10px;
-      padding: 10px;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 10px;
-      font-size: .95rem;
-    }
-    th, td {
-      border: 1px solid var(--line);
-      padding: 8px;
-      text-align: left;
-      vertical-align: top;
-    }
-    th { background: #f9fafb; color: #0f4d74; }
-    .badge-ok {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 999px;
-      border: 1px solid #86efac;
-      background: #f0fdf4;
-      color: #166534;
-      font-size: .8rem;
-      margin-right: 6px;
-    }
-    .badge-info {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 999px;
-      border: 1px solid #bfdbfe;
-      background: #eff6ff;
-      color: #1d4ed8;
-      font-size: .8rem;
-      margin-right: 6px;
-    }
-    .footer { margin-top: 16px; color: var(--muted); font-size: .9rem; text-align: center; }
+    body { margin: 0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 1000px; margin: 0 auto; padding: 40px 24px 72px; }
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin-top: 0; font-size: 2.2rem; }
+    h2 { margin-top: 2.4rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin: 18px 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { background: var(--panel-2); padding: 16px; border-radius: 8px; overflow: auto; border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--panel-2); }
+    a { color: var(--accent); }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <section class="hero">
-      <h1>Complete Technical Manual · NDI LAN Streaming</h1>
-      <p>Comprehensive guide for the LAN NDI sender: architecture, internal flow, design decisions, operations, troubleshooting, and extension guidance.</p>
-      <div class="meta">
-        <span class="pill">Project: Py_NDI</span>
-        <span class="pill">Focus: NDI LAN streaming</span>
-        <span class="pill">Last updated: 2026-05-27</span>
-      </div>
-    </section>
+  <main>
+    <p class="pill">Updated: 2026-06-17</p>
+    <h1>Technical Manual - SuperResolution NDI Streaming</h1>
+    <p>This manual describes the current Python NDI streamer implementation. The primary architectural goal is stable long-run A/V sync with fewer opaque layers and a clear extension path for features such as Unity-driven viewport overlays.</p>
 
-    <section class="card">
-      <h2>0. Documentation Navigation</h2>
-      <h3>HTML</h3>
+    <div class="card">
+      <strong>Navigation</strong>
       <ul>
-        <li>ES (core manual): <a href="./manual_tecnico_streaming_ndi_es.html"><code>manual_tecnico_streaming_ndi_es.html</code></a></li>
-        <li>ES (visual architecture): <a href="./arquitectura_visual_ndi_streaming.html"><code>arquitectura_visual_ndi_streaming.html</code></a></li>
-        <li>EN (technical manual): <a href="./technical_manual_streaming_ndi_en.html"><code>technical_manual_streaming_ndi_en.html</code></a></li>
-        <li>ES (deliverable section): <a href="./Deliverable/ffmpeg_migration_decision_section_es.html"><code>ffmpeg_migration_decision_section_es.html</code></a></li>
-        <li>EN (deliverable section): <a href="./Deliverable/ffmpeg_migration_decision_section_en.html"><code>ffmpeg_migration_decision_section_en.html</code></a></li>
+        <li><a href="./manual_tecnico_streaming_ndi_es.html">ES version</a></li>
+        <li><a href="./Deliverable/ndi_sender_libndi_decision_en.html">Decision: direct libndi sender</a></li>
+        <li><a href="./Deliverable/pyav_media_timeline_decision_en.html">Decision: unified media timeline with PyAV</a></li>
       </ul>
-      <h3>Markdown</h3>
-      <ul>
-        <li>ES (technical manual): <a href="./manual_tecnico_streaming_ndi_es.md"><code>manual_tecnico_streaming_ndi_es.md</code></a></li>
-        <li>EN (technical manual): <a href="./technical_manual_streaming_ndi_en.md"><code>technical_manual_streaming_ndi_en.md</code></a></li>
-        <li>ES (deliverable section): <a href="./Deliverable/ffmpeg_migration_decision_section_es.md"><code>ffmpeg_migration_decision_section_es.md</code></a></li>
-        <li>EN (deliverable section): <a href="./Deliverable/ffmpeg_migration_decision_section_en.md"><code>ffmpeg_migration_decision_section_en.md</code></a></li>
-        <li>Deliverables folder: <a href="./Deliverable/"><code>Deliverable/</code></a></li>
-      </ul>
-      <p>Linearity: every satellite document and deliverable should link back to the core manual.</p>
-    </section>
+    </div>
 
-    <section class="card">
-      <h2>1. Executive Summary</h2>
-      <p>The project publishes an NDI source from a local video file, with synchronized audio and an optional dual-output mode (secondary stream with animated overlay).</p>
-      <p>
-        <span class="badge-ok">Status: operational</span>
-        <span class="badge-info">Video + audio</span>
-        <span class="badge-info">Optional dual mode</span>
-        <span class="badge-info">Monotonic pacing</span>
-      </p>
-      <ul>
-        <li><strong>Entry point:</strong> <code>stream_video.py</code>.</li>
-        <li><strong>Helper module:</strong> <code>utils.py</code>.</li>
-        <li><strong>Python deps:</strong> <code>cyndilib</code> and <code>numpy</code>.</li>
-        <li><strong>External tools:</strong> <code>ffmpeg</code> and <code>ffprobe</code>.</li>
-      </ul>
-    </section>
+    <h2>1. Executive summary</h2>
+    <ul>
+      <li>Main entry point: <code>stream_video.py</code>.</li>
+      <li>Unified A/V decode: <code>media_reader.py</code> with <code>PyAV</code>.</li>
+      <li>NDI sender: <code>ndi_native.py</code> using direct <code>libndi</code>.</li>
+      <li>Frame processing and overlays: <code>numpy</code>.</li>
+      <li>Unity backchannel: received NDI metadata can be projected back into outgoing video.</li>
+    </ul>
 
-    <section class="card">
-      <h2>2. Structure and Components</h2>
-      <table>
-        <thead><tr><th>Path</th><th>Role</th><th>Notes</th></tr></thead>
-        <tbody>
-          <tr><td><code>stream_video.py</code></td><td>Full orchestration: metadata, A/V decode, NDI send, pacing.</td><td>Includes error handling and decoder restart path.</td></tr>
-          <tr><td><code>ffmpeg.py</code></td><td>Media probing/decoding helpers.</td><td>Isolates ffprobe/ffmpeg subprocess logic.</td></tr>
-          <tr><td><code>utils.py</code></td><td>NDI sender creation and animated overlay.</td><td>Encapsulates <code>VideoSendFrame</code> setup.</td></tr>
-          <tr><td><code>core/</code></td><td>Runtime timing primitives.</td><td>Contains monotonic frame clock.</td></tr>
-          <tr><td><code>extensions/backchannel/</code></td><td>Generic metadata return-channel infrastructure.</td><td>Receiver + dispatcher.</td></tr>
-          <tr><td><code>integrations/unity/</code></td><td>Unity-specific metadata parsing/handling.</td><td>Optional integration layer.</td></tr>
-          <tr><td><code>Launchers/</code></td><td>macOS launcher scripts/apps.</td><td>Default and lowres WAN profiles.</td></tr>
-          <tr><td><code>requirements.txt</code></td><td>Python environment dependencies.</td><td>Minimal runtime requirements.</td></tr>
-          <tr><td><code>Videos/</code></td><td>Playback/test assets.</td><td>Script default source path.</td></tr>
-          <tr><td><code>Documentation/</code></td><td>Technical manuals.</td><td>HTML ES/EN + Markdown ES/EN.</td></tr>
-        </tbody>
-      </table>
-    </section>
+    <h2>2. Current architecture</h2>
+    <pre>CLI -> LoopingMediaReader (PyAV)
+    -> time-ordered media events (video/audio)
+    -> single playback clock in stream_video.py
+    -> NativeNdiSender (libndi)
+    -> primary NDI output
+    -> optional secondary NDI output (--dual)
+    -> optional Unity metadata overlay</pre>
+    <p>The key change is that audio and video now come from the same media timeline. The system no longer reconstructs audio by slicing a predecoded buffer from video frame indices.</p>
 
-    <section class="card">
-      <h2>3. Technical Stack</h2>
-      <table>
-        <thead><tr><th>Component</th><th>Actual usage</th><th>Reason</th></tr></thead>
-        <tbody>
-          <tr><td><code>cyndilib</code></td><td><code>Sender</code>, <code>VideoSendFrame</code>, <code>AudioSendFrame</code>.</td><td>NDI-oriented API with coherent video+audio sending.</td></tr>
-          <tr><td><code>numpy</code></td><td>Frame and audio buffer manipulation.</td><td>Performance and memory control.</td></tr>
-          <tr><td><code>ffprobe</code></td><td>Resolution/fps/frame count metadata.</td><td>Reliable preflight metadata.</td></tr>
-          <tr><td><code>ffmpeg</code></td><td>Raw BGRA video and float32 audio decode.</td><td>Stable codec compatibility.</td></tr>
-        </tbody>
-      </table>
-      <div class="warn"><strong>Intentional design:</strong> the pipeline avoids <code>cv2</code> to prevent native media-library conflicts on macOS with some NDI driver setups.</div>
-    </section>
+    <h2>3. Main components</h2>
+    <table>
+      <thead><tr><th>Path</th><th>Role</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>stream_video.py</code></td><td>Runtime orchestration</td><td>Scheduling, dual output, metadata, cleanup</td></tr>
+        <tr><td><code>media_reader.py</code></td><td>Unified media reader</td><td>Loop-pass handling, A/V decode and ordering</td></tr>
+        <tr><td><code>ndi_native.py</code></td><td>Minimal NDI bindings</td><td>Direct sender and metadata capture</td></tr>
+        <tr><td><code>utils.py</code></td><td>Visual helpers and sender factory</td><td>Simple overlay and sender configuration</td></tr>
+        <tr><td><code>extensions/backchannel/receiver.py</code></td><td>Metadata return path</td><td>Receives XML from NDI receivers</td></tr>
+        <tr><td><code>integrations/unity/</code></td><td>Unity integration</td><td>Viewport parsing and state handling</td></tr>
+      </tbody>
+    </table>
 
-    <section class="card">
-      <h2>4. Pipeline Architecture</h2>
-      <pre>
-CLI -> parse args -> ffprobe metadata -> sender config (NDI)
-    -> ffmpeg video raw BGRA pipe + ffmpeg audio f32le
-    -> loop:
-         BGRA frame
-         audio block (channels,samples)
-         write_video_and_audio()
-         monotonic pacing
-      </pre>
-      <h3>Data contracts</h3>
-      <ul>
-        <li><strong>Video:</strong> <code>BGRA</code>, 8-bit/channel, linear memory.</li>
-        <li><strong>Frame bytes:</strong> <code>width * height * 4</code>.</li>
-        <li><strong>Audio:</strong> <code>float32</code>, shape <code>(channels, samples)</code>.</li>
-        <li><strong>Sample rate:</strong> 48 kHz, 2 channels.</li>
-      </ul>
-    </section>
+    <h2>4. Dependencies</h2>
+    <table>
+      <thead><tr><th>Component</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td><code>numpy==2.3.5</code></td><td>Mandatory</td><td>Video/audio buffers and overlays</td></tr>
+        <tr><td><code>av==17.1.0</code></td><td>Mandatory</td><td>Unified timeline and A/V decode</td></tr>
+        <tr><td><code>libndi</code></td><td>Mandatory</td><td>Native NDI sender runtime</td></tr>
+        <tr><td><code>cyndilib</code></td><td>Optional/legacy</td><td>No longer required for streaming; may still help locate a bundled libndi in development</td></tr>
+        <tr><td><code>ffmpeg</code></td><td>Optional outside runtime</td><td>Useful for preprocessing or helper launchers, not for the main streaming path</td></tr>
+      </tbody>
+    </table>
 
-    <section class="card">
-      <h2>5. Step-by-step Execution Flow</h2>
-      <ol>
-        <li>Parse CLI args and select input video (default under <code>Videos/</code>).</li>
-        <li>Read width/height/fps/frame count with <code>ffprobe</code>.</li>
-        <li>Create and configure main NDI sender.</li>
-        <li>Compute audio samples-per-frame from declared fps.</li>
-        <li>Decode full audio into memory for deterministic access.</li>
-        <li>Start BGRA rawvideo decoder process.</li>
-        <li>Per frame: read video + audio block and send.</li>
-        <li>If video pipe breaks, restart decoder and re-sync audio cursor.</li>
-        <li>Use monotonic accumulated clock for output pacing.</li>
-      </ol>
-    </section>
+    <h2>5. Active design decisions</h2>
+    <ul>
+      <li><strong>One timing authority:</strong> playback timing lives in <code>stream_video.py</code>.</li>
+      <li><strong>One media timeline:</strong> <code>PyAV</code> emits A/V events from the same container.</li>
+      <li><strong>Direct sender:</strong> the high-level wrapper is avoided to reduce opaque buffering.</li>
+      <li><strong>Metadata as an extension:</strong> viewport overlays enrich the base pipeline instead of redefining it.</li>
+    </ul>
 
-    <section class="card">
-      <h2>6. Function Analysis (`stream_video.py`)</h2>
-      <table>
-        <thead><tr><th>Function</th><th>Lines</th><th>Responsibility</th></tr></thead>
-        <tbody>
-          <tr><td><code>_configure_audio_frame</code></td><td>28-32</td><td>Configures audio frame shape/rate for each sender.</td></tr>
-          <tr><td><code>stream_video</code></td><td>35-220</td><td>Setup, loop, A/V send, dual mode, metadata RX, cleanup.</td></tr>
-          <tr><td>Main block</td><td>223-243</td><td>CLI entry and argument flags.</td></tr>
-        </tbody>
-      </table>
-    </section>
+    <h2>6. Runtime flow</h2>
+    <ol>
+      <li>CLI arguments are parsed.</li>
+      <li><code>LoopingMediaReader</code> opens the media and detects video/audio streams.</li>
+      <li>Main sender and optional secondary sender are configured.</li>
+      <li>The runtime consumes video or audio events already ordered by media time.</li>
+      <li>The scheduler waits for each event deadline and sends the frame or audio chunk.</li>
+      <li>If recent Unity metadata exists, it is drawn into the outgoing video frame before send.</li>
+      <li>At end of file, the reader reopens the media and continues with an accumulated media-time offset.</li>
+    </ol>
 
-    <section class="card">
-      <h2>7. Function Analysis (`ffmpeg.py and utils.py`)</h2>
-      <table>
-        <thead><tr><th>Function</th><th>Lines</th><th>Responsibility</th></tr></thead>
-        <tbody>
-          <tr><td><code>_parse_fps</code> (<code>ffmpeg.py</code>)</td><td>12-18</td><td>Normalizes fps with safe fallback.</td></tr>
-          <tr><td><code>probe_video</code> (<code>ffmpeg.py</code>)</td><td>21-75</td><td>Video metadata via <code>ffprobe</code>.</td></tr>
-          <tr><td><code>start_video_decoder</code> (<code>ffmpeg.py</code>)</td><td>78-100</td><td>Starts looping raw BGRA decoder process.</td></tr>
-          <tr><td><code>read_exact</code> (<code>ffmpeg.py</code>)</td><td>103-113</td><td>Exact byte reads per frame.</td></tr>
-          <tr><td><code>decode_audio_to_array</code> (<code>ffmpeg.py</code>)</td><td>116-160</td><td>Decodes full audio into planar float32 array.</td></tr>
-        </tbody>
-      </table>
-      <h3>utils.py</h3>
-      <table>
-        <thead><tr><th>Function</th><th>Lines</th><th>Responsibility</th></tr></thead>
-        <tbody>
-          <tr><td><code>_pixelate_roi</code> (<code>utils.py</code>)</td><td>10-16</td><td>Simple pixelation by subsampling.</td></tr>
-          <tr><td><code>draw_square</code> (<code>utils.py</code>)</td><td>19-43</td><td>Animated overlay with sinusoidal motion.</td></tr>
-          <tr><td><code>make_sender</code> (<code>utils.py</code>)</td><td>46-57</td><td>NDI sender and frame format setup.</td></tr>
-        </tbody>
-      </table>
-    </section>
+    <h2>7. Operation</h2>
+    <pre>python3 -m pip install -r requirements.txt
+python3 stream_video.py
+python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
+python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
 
-    <section class="card">
-      <h2>8. Timing and Synchronization</h2>
-      <h3>8.1 Video pacing</h3>
-      <ul>
-        <li>Uses accumulated scheduling: <code>next_frame_time += frame_duration</code>.</li>
-        <li>On overruns, re-syncs to <code>now</code> to prevent infinite drift accumulation.</li>
-      </ul>
-      <h3>8.2 Audio/frame relation</h3>
-      <ul>
-        <li><code>audio_samples_per_frame = round(sample_rate / fps)</code>.</li>
-        <li>If fractional, warns and uses fixed block size for channel/stride stability.</li>
-      </ul>
-      <h3>8.3 Buffer integrity</h3>
-      <ul>
-        <li>Uses <code>np.frombuffer(...).copy()</code> to ensure writable memory for cyndilib.</li>
-        <li>Prevents: <code>ValueError: buffer source array is read-only</code>.</li>
-      </ul>
-    </section>
+    <h2>8. Recommended QA</h2>
+    <ol>
+      <li>Validate first in NDI Monitor.</li>
+      <li>Repeat next in Unity.</li>
+      <li>Run long sessions with production-like sources.</li>
+      <li>Compare 24/23.976 fps and 60/59.94 fps behavior.</li>
+      <li>Verify sources with audio, without audio, and source changes when relevant.</li>
+    </ol>
 
-    <section class="card">
-      <h2>9. Dual Mode</h2>
-      <p>With <code>--dual</code>, a secondary NDI source is created with suffix <code>-Square</code>.</p>
-      <ul>
-        <li>Main output remains clean video.</li>
-        <li>Secondary output adds animated overlay.</li>
-        <li>Both may share the same per-frame audio block.</li>
-      </ul>
-    </section>
+    <h2>9. Troubleshooting</h2>
+    <table>
+      <thead><tr><th>Symptom</th><th>Likely area</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td>NDI source not visible</td><td>NDI runtime or network visibility</td><td>Verify <code>libndi</code> installation and LAN visibility</td></tr>
+        <tr><td>Script fails at startup</td><td><code>PyAV</code> dependency</td><td>Reinstall <code>requirements.txt</code></td></tr>
+        <tr><td>Long-run A/V drift</td><td>Source generation or scheduler</td><td>Compare NDI Monitor and Unity, then inspect sender logs</td></tr>
+        <tr><td>Video stutter</td><td>Decode pressure or CPU load</td><td>Reduce source complexity and inspect timing warnings</td></tr>
+        <tr><td>Viewport overlay missing</td><td>Backchannel or stale metadata</td><td>Check Python console and Unity metadata emission</td></tr>
+      </tbody>
+    </table>
 
-    <section class="card">
-      <h2>10. Operations</h2>
-      <h3>10.1 Install</h3>
-      <pre>cd &lt;project-root&gt;
-python3 -m pip install -r requirements.txt</pre>
-      <h3>10.2 Run</h3>
-      <pre>python3 ./stream_video.py
-python3 ./stream_video.py Videos/big_buck_bunny.mp4
-python3 ./stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
-      <h3>10.3 Quick validation</h3>
-      <ol>
-        <li>Open NDI Monitor (or compatible receiver).</li>
-        <li>Validate main source visibility.</li>
-        <li>In dual mode, validate secondary overlay source.</li>
-        <li>Validate audio playback if media contains audio.</li>
-      </ol>
-    </section>
-
-    <section class="card">
-      <h2>11. Advanced Troubleshooting</h2>
-      <table>
-        <thead><tr><th>Symptom</th><th>Likely cause</th><th>Recommended action</th></tr></thead>
-        <tbody>
-          <tr><td>No NDI output</td><td>NDI runtime/network visibility issue.</td><td>Verify runtime install and same LAN segment.</td></tr>
-          <tr><td>No audio</td><td>Missing ffmpeg or no audio track in file.</td><td>Install ffmpeg and validate track with ffprobe.</td></tr>
-          <tr><td>Jitter/stutter</td><td>CPU overload or timing overruns.</td><td>Reduce source fps/resolution and monitor warnings.</td></tr>
-          <tr><td>Read-only buffer error</td><td>Frame built over immutable bytes.</td><td>Use writable copy before send (already integrated).</td></tr>
-          <tr><td>Intermittent frame failures</td><td>Decoder pipe closed unexpectedly.</td><td>Automatic decoder restart path is built in.</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section class="card">
-      <h2>12. Performance and Scalability</h2>
-      <ul>
-        <li>Critical path is decode + per-frame NDI send.</li>
-        <li>Dual mode adds copy/overlay/send overhead.</li>
-        <li>For lower-end hosts, prefer moderate bitrate/fps assets.</li>
-      </ul>
-      <h3>Recommendations</h3>
-      <ul>
-        <li>Use files with stable declared fps.</li>
-        <li>Keep OS + NDI software stack updated.</li>
-        <li>Track timing warnings during long sessions.</li>
-      </ul>
-    </section>
-
-    <section class="card">
-      <h2>13. Extension Guide</h2>
-      <ol>
-        <li>Add new overlays by extending <code>utils.py</code>.</li>
-        <li>Add CLI modes from the <code>__main__</code> argument parser block.</li>
-        <li>Add telemetry counters and periodic reporting every N frames.</li>
-        <li>Scale to multi-source by instantiating multiple senders with aligned timing.</li>
-      </ol>
-    </section>
-
-    <section class="card">
-      <h2>14. Key Code References</h2>
-      <table>
-        <thead><tr><th>File</th><th>Lines</th><th>Key point</th></tr></thead>
-        <tbody>
-          <tr><td><code>ffmpeg.py</code></td><td>21-75</td><td>Robust metadata preflight.</td></tr>
-          <tr><td><code>ffmpeg.py</code></td><td>116-160</td><td>Audio decode to NDI-friendly structure.</td></tr>
-          <tr><td><code>stream_video.py</code></td><td>131-220</td><td>Main loop, sending, and recovery logic.</td></tr>
-          <tr><td><code>stream_video.py</code></td><td>149-150</td><td>Writable frame buffer fix for cyndilib.</td></tr>
-          <tr><td><code>core/clock.py</code></td><td>8-33</td><td>Monotonic pacing and overrun resync.</td></tr>
-          <tr><td><code>utils.py</code></td><td>46-57</td><td>Sender/frame setup details.</td></tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section class="card">
-      <h2>15. Validation Checklist</h2>
-      <ol>
-        <li>Python dependencies installed.</li>
-        <li><code>ffmpeg</code> and <code>ffprobe</code> available in PATH.</li>
-        <li>Stable run in normal mode.</li>
-        <li>Stable run in <code>--dual</code> mode.</li>
-        <li>Audio + video visible on NDI receiver.</li>
-      </ol>
-    </section>
-
-    <section class="card">
-      <h2>16. Technical Conclusion</h2>
-      <p>The current implementation provides a stable and maintainable NDI LAN pipeline, with practical A/V synchronization and decoder-failure recovery behavior.</p>
-      <p>This manual is intentionally detailed so any engineer can operate, debug, and extend the system confidently.</p>
-    </section>
-
-
-
-    <section class="card">
-      <h2>17. Architecture Decision: FFmpeg Migration</h2>
-      <h3>Technical context</h3>
-      <ul>
-        <li>The original implementation was functional, but specific macOS environments exposed a native-library conflict inside the same process.</li>
-        <li>OpenCV loaded one <code>libavdevice</code> variant while the NDI HX stack loaded another variant with overlapping Objective-C classes.</li>
-        <li>That condition could trigger spurious casting failures, non-deterministic behavior, and crash risk.</li>
-      </ul>
-      <h3>Decision taken</h3>
-      <ul>
-        <li>Remove OpenCV from the runtime streamer path.</li>
-        <li>Use <code>ffprobe</code>/<code>ffmpeg</code> for probing and decoding.</li>
-        <li>Keep frame/overlay operations in <code>numpy</code>.</li>
-      </ul>
-      <h3>Benefits obtained</h3>
-      <ul>
-        <li>Removal of the native conflict root cause in the sender process.</li>
-        <li>More predictable behavior for cross-organization integration.</li>
-        <li>Preserved compatibility with <code>np.ndarray</code>-based downstream processing.</li>
-        <li>Decode performance aligned with project targets (typically comparable or better, depending on host/load).</li>
-      </ul>
-      <h3>Validation scope</h3>
-      <p>The solution has been tested on macOS and Apple Vision Pro.</p>
-    </section>
-
-
-    <section class="card">
-      <h2>18. NDI Metadata Return Channel (Unity -> Server)</h2>
-      <h3>Objective</h3>
-      <p>This feature enables return communication from Unity (NDI receiver) back to this streamer (NDI sender) using NDI SDK XML metadata, without adding a WebSocket layer.</p>
-
-      <h3>Technical components</h3>
-      <ul>
-        <li>Unity: <code>NdiReceiverMetadataSender</code>, <code>NdiTransformMetadataPayloadProvider</code>, <code>NdiHeadViewportMetadataPayloadProvider</code>, <code>NdiMetadataInterop</code>.</li>
-        <li>Server: <code>extensions/backchannel/receiver.py</code>, <code>extensions/backchannel/dispatcher.py</code>, <code>integrations/unity/parsers.py</code>, <code>integrations/unity/handlers.py</code>, plus integration in <code>stream_video.py</code>.</li>
-      </ul>
-
-      <h3>Runtime flow</h3>
-      <ol>
-        <li>Unity builds XML payloads such as <code>&lt;access_transform ... /&gt;</code>, <code>&lt;access_viewport ... /&gt;</code>, or <code>&lt;access_client ... /&gt;</code>.</li>
-        <li>Unity sends metadata through <code>NDIlib_recv_send_metadata</code>.</li>
-        <li>Python sender captures incoming metadata with <code>NDIlib_send_capture</code>.</li>
-        <li>Server parses XML, updates the latest state, and draws debug overlays into the NDI video frame before sending it.</li>
-      </ol>
-
-      <h3><code>access_viewport</code> contract aligned with Unity</h3>
-      <p>Unity/AVP computes the 3D math locally because it owns the camera, head transform, collider and surface orientation. Python does not raycast against Unity: it receives a compact description in NDI texture coordinates and converts it into pixels on the frame it publishes.</p>
-      <ul>
-        <li><code>uv_projection</code>: surface projection mode (<code>MeshTextureCoordinates</code>, <code>EquirectangularSphere</code>, etc.).</li>
-        <li><code>uv_poly_n</code> + <code>uv_poly{i}_x/y</code>: visible viewport polygon in normalized <code>[0..1]</code> UVs.</li>
-        <li><code>gaze_hit</code>: <code>1</code> when the camera center ray directly intersects the NDI surface.</li>
-        <li><code>gaze_uv_x/y</code>: exact gaze point in UVs. Use only when <code>gaze_hit=1</code>.</li>
-        <li><code>gaze_world_x/y/z</code>: world-space center intersection point when Unity includes it.</li>
-        <li><code>uv_cx/uv_cy</code>: useful ROI center kept for compatibility; it can be a centroid/fallback and should not be used as the precise gaze point.</li>
-        <li><code>erp_frustum_valid</code> + <code>erp_corner{i}_x/y/z</code>: normalized directions of the four viewport corners for equirectangular spheres/hemispheres.</li>
-        <li><code>erp_edge{i}_nx/ny/nz</code>: lateral frustum planes, kept for advanced consumers and fallback/debug.</li>
-        <li><code>uv_contains_north_pole</code> / <code>uv_contains_south_pole</code>: pole flags for ERP region resolution.</li>
-        <li><code>seq</code>: sequence number; Python uses it to avoid repeating work when metadata has not changed, especially for expensive fallbacks.</li>
-      </ul>
-
-      <h3>How Python draws visual feedback</h3>
-      <ul>
-        <li>Plane: converts UV to pixel with <code>x = round(u * (width - 1))</code> and <code>y = round((1 - v) * (height - 1))</code>, inverting <code>v</code> because image rows start at the top.</li>
-        <li>Plane ROI: <code>stream_video.py</code> draws only the red outline from <code>uv_polygon</code>.</li>
-        <li>Hit marker: when <code>gaze_hit=1</code>, draws a yellow <code>+</code> at <code>gaze_uv_x/y</code>. This is constant cost: two thin rectangles on the frame.</li>
-        <li>ERP: the primary path draws the real frustum edges. Python interpolates each pair of <code>erp_corner</code> directions with <code>slerp</code>, converts samples to equirectangular UV, and splits the polyline when it crosses the <code>u=0/1</code> seam. <code>uv_polygon</code> remains as fallback/debug.</li>
-        <li>Performance: the interior is never painted, for either planes or ERP. Outline masks are cached by resolution, <code>seq</code>, thickness and polygon/ERP corners. Viewport logs are rate-limited so stdout cannot become a bottleneck.</li>
-        <li>Staleness: if no fresh metadata arrives within <code>viewport_stale_timeout_seconds</code>, Python stops drawing overlays and the frame returns clean.</li>
-      </ul>
-
-      <h3>CLI and logging (server)</h3>
-      <ul>
-        <li>Enabled by default: <code>python3 stream_video.py</code></li>
-        <li>Raw XML logging: <code>--rx-metadata-verbose</code></li>
-        <li>Legacy flag (no effect, kept for compatibility): <code>--rx-metadata-log-all</code></li>
-        <li>Disable return channel: <code>--no-rx-metadata</code></li>
-      </ul>
-      <p>Current default mode: no periodic log spam when no metadata arrives, and all received messages are logged (no server-side duplicate filtering). Cadence/duplication control is managed on Unity side (metadata sender).</p>
-
-      <h3>Quick log interpretation</h3>
-      <ul>
-        <li><code>[RX-META]</code>: raw XML message received.</li>
-        <li><code>[RX Transform]</code>: transform payload parsed successfully.</li>
-        <li><code>[RX Viewport]</code>: ROI/gaze payload parsed successfully. Includes <code>poly_n</code>, <code>gaze_hit</code>, <code>gaze_uv</code>, and ERP state.</li>
-        <li><code>cap_meta</code> in final summary: metadata frames captured by <code>send_capture</code>.</li>
-        <li><code>received</code>: valid parsed messages queued by the backchannel.</li>
-      </ul>
-
-      <h3>Note on <code>connections</code></h3>
-      <p><code>get_num_connections()</code> may report <code>2</code> even when you perceive a single client. One application can open multiple internal subscriptions to the same source. This does not necessarily mean two physical devices.</p>
-
-      <h3>Validated state</h3>
-      <ul>
-        <li>Validated in real Unity Editor -&gt; Python server workflow.</li>
-        <li>Confirmed reception of <code>access_client</code>, <code>access_transform</code>, and <code>access_viewport</code>.</li>
-        <li>Visual feedback confirmed: red ROI outline and gaze <code>+</code> hit marker.</li>
-      </ul>
-    </section>
-
-
-    <section class="card">
-      <h2>19. WAN Publication Validation (Public IP)</h2>
-      <h3>Objective</h3>
-      <p>Extend NDI publishing beyond LAN so receivers on external networks can consume the stream through public IP and router NAT rules.</p>
-
-      <h3>Key outcome</h3>
-      <ul>
-        <li>No streamer code changes were required for this milestone (<code>stream_video.py</code> remained unchanged).</li>
-        <li>WAN publication was achieved through network configuration (router/firewall/receiver).</li>
-      </ul>
-
-      <h3>Validated host setup</h3>
-      <ul>
-        <li>Host public IP: <code>85.52.8.159</code></li>
-        <li>Host LAN IP (sender Mac): <code>192.168.1.33</code></li>
-        <li>Active NAT/PAT rules forwarding to host:
-          <ul>
-            <li><code>5959</code> TCP/UDP (discovery/control)</li>
-            <li><code>5960-6100</code> TCP/UDP (NDI transport)</li>
-            <li><code>7960-8060</code> TCP/UDP (additional compatibility range)</li>
-          </ul>
-        </li>
-      </ul>
-
-      <h3>WAN test procedure (real external network)</h3>
-      <ol>
-        <li>Host runs <code>python3 stream_video.py</code>.</li>
-        <li>Remote receiver (different home/network) opens Access Manager.</li>
-        <li>Receiver adds <code>External Source</code> with <code>85.52.8.159</code>.</li>
-        <li>Receiver opens NDI Video Monitor and selects the source.</li>
-        <li>Audio/video reception is validated across WAN.</li>
-      </ol>
-
-      <h3>Operational notes</h3>
-      <ul>
-        <li>Testing public IP from the same host/LAN may fail due to NAT loopback (expected router behavior).</li>
-        <li>In that scenario, duplicate sources or intermittent black video can appear when local and external paths are mixed.</li>
-        <li>Discovery showing <code>Attempting</code> does not invalidate a working <code>External Source</code> path.</li>
-      </ul>
-
-      <h3>Measured constraints</h3>
-      <ul>
-        <li>With ~20 Mb/s symmetric internet, NDI Full can show audio cuts and very unstable video.</li>
-        <li>For bandwidth-limited WAN links, lowering source resolution/FPS significantly improves stability.</li>
-        <li>Recommended remote-test profile: <code>640x360 @ 24 fps</code>.</li>
-      </ul>
-
-      <h3>Current status</h3>
-      <ul>
-        <li>WAN feature validated across different residential networks.</li>
-        <li>Remote reception confirmed in NDI Video Monitor.</li>
-        <li>Runtime quality depends mainly on available WAN bandwidth and link stability.</li>
-      </ul>
-    </section>
-
-
-    <section class="card">
-      <h2>20. Modular Backchannel Architecture</h2>
-      <h3>Design objective</h3>
-      <p>Keep the base project as an NDI A/V streamer (core) and move return-channel behavior into optional modules that can be enabled/disabled per project.</p>
-
-      <h3>Resulting structure</h3>
-      <ul>
-        <li><code>core/clock.py</code>: monotonic frame clock and pacing.</li>
-        <li><code>extensions/backchannel/receiver.py</code>: receiver -&gt; sender metadata capture (generic infra).</li>
-        <li><code>extensions/backchannel/dispatcher.py</code>: routes messages to handlers.</li>
-        <li><code>integrations/unity/parsers.py</code>: Unity payload parsing (currently <code>access_transform</code>).</li>
-        <li><code>integrations/unity/handlers.py</code>: payload-specific integration handlers.</li>
-      </ul>
-
-      <h3>Extensibility contract</h3>
-      <ul>
-        <li>Core does not depend on Unity-specific payload semantics.</li>
-        <li>New payload types are added in <code>integrations/unity/</code> (parser + handler), without touching base infrastructure.</li>
-        <li>Return channel can be disabled with <code>--no-rx-metadata</code> while keeping pure A/V streaming.</li>
-      </ul>
-
-      <h3>Compatibility status</h3>
-      <ul>
-        <li><code>stream_video.py</code> keeps backward-compatible CLI behavior.</li>
-        <li><code>--rx-metadata-log-all</code> remains as a legacy flag (no functional effect).</li>
-      </ul>
-    </section>
-
-
-    <section class="card">
-      <h2>21. macOS Executable Launchers (Icon-based)</h2>
-      <p>To avoid manual terminal startup, double-click launchers were added:</p>
-      <ul>
-        <li><code>Launchers/Apps/Stream NDI Default.app</code>: one-click Finder launcher for the default profile.</li>
-        <li><code>Launchers/Apps/Stream NDI LowRes WAN.app</code>: one-click Finder launcher for the lowres WAN profile.</li>
-        <li><code>Launchers/Stream_NDI_Default.command</code>: default profile with metadata RX enabled.</li>
-        <li><code>Launchers/Stream_NDI_LowRes_WAN.command</code>: lowres WAN profile with metadata RX enabled and lowres auto-generation if missing.</li>
-      </ul>
-      <p>Stop streaming with <code>Ctrl+C</code> in the Terminal window opened by the launcher.</p>
-    </section>
-
-    <p class="footer">Technical Manual · NDI LAN Streaming</p>
-  </div>
+    <h2>10. Current status</h2>
+    <p>The base architecture is now organized around a cleaner foundation: direct sender, unified media timeline and metadata as an extension layer. The real acceptance criterion from here is long-run validation with representative sources.</p>
+  </main>
 </body>
 </html>

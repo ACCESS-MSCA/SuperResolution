@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decisión de Arquitectura: Timeline único de media con PyAV</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0f1217; --panel:#171b22; --panel-2:#1d2430; --text:#e8eef7; --muted:#a8b3c5; --accent:#78b7ff; --border:#2a3443; }
+    body { margin:0; background:var(--bg); color:var(--text); font:16px/1.65 -apple-system, BlinkMacSystemFont, sans-serif; }
+    main { max-width: 980px; margin: 0 auto; padding: 40px 24px 72px; }
+    h1, h2 { line-height:1.2; }
+    h1 { margin-top:0; font-size:2.1rem; }
+    h2 { margin-top:2.2rem; padding-top:0.9rem; border-top:1px solid var(--border); }
+    .card { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:18px 20px; margin:18px 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    a { color:var(--accent); }
+    ul, ol { padding-left: 1.3rem; }
+    .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:var(--panel-2); border:1px solid var(--border); color:var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="pill">Updated: 2026-06-17</p>
+    <h1>Decisión de Arquitectura: Timeline único de media con PyAV</h1>
+    <div class="card">
+      <strong>Navigation</strong>
+      <ul>
+        <li><a href="./pyav_media_timeline_decision_en.html">Other language version</a></li>
+        <li><a href="../manual_tecnico_streaming_ndi_es.html">Manual core ES</a></li><li><a href="./ndi_sender_libndi_decision_es.html">Decisión previa: sender directo libndi</a></li>
+      </ul>
+    </div>
+    
+<p>Después de mover el sender a <code>libndi</code> directo, la deriva larga seguía apareciendo. Eso cambió el foco: el problema ya no parecía estar solo en el wrapper, sino en cómo el streamer reconstruía el tiempo de audio y vídeo.</p>
+<h2>1. Problema</h2>
+<p>El modelo anterior desacoplaba audio y vídeo:</p>
+<ul>
+  <li>vídeo paced por fps,</li>
+  <li>audio decodificado completo y troceado según el índice de frame de vídeo.</li>
+</ul>
+<p>Ese enfoque introducía dos relojes implícitos y abría la puerta a drift acumulado en sesiones largas, especialmente con fps fraccionales o cambios de señal.</p>
+<h2>2. Decisión</h2>
+<p>La nueva arquitectura usa <code>PyAV</code> como reader unificado del contenedor. Cada evento de audio o vídeo sale con su tiempo de media y el runtime usa un solo reloj de reproducción.</p>
+<h2>3. Cambios aplicados</h2>
+<ul>
+  <li><code>media_reader.py</code> introduce el timeline único.</li>
+  <li><code>stream_video.py</code> consume <code>MediaVideoEvent</code> y <code>MediaAudioEvent</code>.</li>
+  <li><code>utils.py</code> crea el sender con clocks NDI desactivados para evitar doble autoridad temporal.</li>
+  <li><code>requirements.txt</code> fija <code>av==17.1.0</code>.</li>
+</ul>
+<h2>4. Qué se gana</h2>
+<ul>
+  <li>menos lógica manual propensa a error,</li>
+  <li>mejor comportamiento con 23.976/24/59.94/60 fps,</li>
+  <li>menos acoplamiento entre cadencia de vídeo y entrega de audio,</li>
+  <li>una arquitectura mucho más legible para el equipo.</li>
+</ul>
+<h2>5. Tradeoffs</h2>
+<ul>
+  <li>entra una dependencia nueva: <code>PyAV</code>,</li>
+  <li>hay que validar bien su instalación en las máquinas objetivo,</li>
+  <li><code>ffmpeg.py</code> queda como helper legacy y podrá limpiarse después.</li>
+</ul>
+<h2>6. Criterio de validación</h2>
+<ol>
+  <li>sesiones largas sin drift en NDI Monitor,</li>
+  <li>mismo resultado en Unity,</li>
+  <li>buen comportamiento con señales a 24 y 60 fps,</li>
+  <li>estabilidad tras reinicios o cambios de señal.</li>
+</ol>
+<h2>7. Resumen</h2>
+<p><code>PyAV</code> no se introduce para complicar el proyecto, sino para quitar la parte más sospechosa del modelo anterior: reconstruir audio desde la rejilla temporal del vídeo en lugar de respetar el tiempo real del contenedor.</p>
+
+  </main>
+</body>
+</html>

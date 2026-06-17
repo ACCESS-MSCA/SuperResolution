@@ -1,5 +1,5 @@
 """
-Stream a video file as an NDI source using cyndilib.
+Stream a video file as an NDI source using direct libndi calls.
 Other apps on the network (OBS, NDI Monitor, etc.) can receive it.
 
 Usage:
@@ -17,12 +17,10 @@ import sys
 import time
 
 import numpy as np
-from cyndilib.audio_frame import AudioSendFrame
 
-from core import MonotonicFrameClock
 from extensions.backchannel import MetadataDispatcher, NdiSenderBackchannelReceiver
-from ffmpeg import decode_audio_to_array, probe_video, read_exact, start_video_decoder
 from integrations.unity import UnityTransformLogHandler, UnityViewportMetadata, UnityViewportStateHandler
+from media_reader import LoopingMediaReader, MediaAudioEvent, MediaVideoEvent
 from utils import draw_square, make_sender
 
 _ERP_ROI_MASK_CACHE: dict[tuple, np.ndarray] = {}
@@ -33,10 +31,7 @@ _ERP_FRUSTUM_EDGE_SAMPLES = 96
 
 
 def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples: int) -> None:
-    af = AudioSendFrame(max_num_samples=max_samples)
-    af.sample_rate = sample_rate
-    af.num_channels = channels
-    sender.set_audio_frame(af)
+    sender.configure_audio(sample_rate, channels, max_samples)
 
 
 def _clamp01(value: float) -> float:
@@ -466,6 +461,36 @@ def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, 
     _draw_gaze_hit_marker(frame_bgra, viewport)
 
 
+def _wait_until_media_deadline(
+    playback_start_monotonic: float,
+    first_media_time_seconds: float,
+    media_time_seconds: float,
+    late_count: int,
+) -> tuple[float, int]:
+    relative_media_time = media_time_seconds - first_media_time_seconds
+    target_time = playback_start_monotonic + relative_media_time
+    now = time.monotonic()
+    sleep_for = target_time - now
+
+    if sleep_for > 0.0:
+        time.sleep(sleep_for)
+        return playback_start_monotonic, late_count
+
+    late_seconds = -sleep_for
+    if late_seconds > 0.002:
+        late_count += 1
+        if late_count % 120 == 0:
+            print(
+                f"[warn] timing late {late_count} times "
+                f"(latest overrun: {late_seconds * 1000.0:.2f} ms)"
+            )
+
+    if late_seconds > 0.250:
+        playback_start_monotonic = now - relative_media_time
+
+    return playback_start_monotonic, late_count
+
+
 def stream_video(
     video_path: str,
     source_name: str = "StreamNDI",
@@ -474,44 +499,41 @@ def stream_video(
     rx_metadata_verbose: bool = False,
     rx_metadata_log_all: bool = False,
 ):
-    width, height, fps, total_frames = probe_video(video_path)
+    media_reader = LoopingMediaReader(video_path, audio_sample_rate=48000, audio_channels=2)
+    media_info = media_reader.info
+
+    width = media_info.width
+    height = media_info.height
+    fps = media_info.fps
+    total_frames = media_info.total_video_frames
     fps_float = float(fps)
 
     print(f"Source  : {video_path}")
     print(f"Size    : {width}x{height} @ {fps_float:.3f} fps ({total_frames} frames)")
 
-    audio_sample_rate = 48000
-    audio_channels = 2
-    samples_per_frame_exact = audio_sample_rate / max(fps_float, 1.0)
-    audio_samples_per_frame = max(1, int(round(samples_per_frame_exact)))
-
     sender_plain, _ = make_sender(source_name, width, height, fps)
     print(f"NDI name: '{source_name}'")
-    print(
-        f"Audio   : {audio_sample_rate} Hz, {audio_channels} ch, "
-        f"{audio_samples_per_frame} samples/frame"
-    )
 
-    if abs(samples_per_frame_exact - audio_samples_per_frame) > 1e-6:
-        print(
-            f"[warn] fractional audio/frame ({samples_per_frame_exact:.6f}); "
-            "using fixed-size blocks for channel stability."
+    audio_enabled = media_info.audio_enabled
+    if audio_enabled:
+        _configure_audio_frame(
+            sender_plain,
+            media_info.audio_sample_rate,
+            media_info.audio_channels,
+            media_info.audio_max_samples_per_chunk,
         )
+        print(
+            f"Audio   : {media_info.audio_sample_rate} Hz, {media_info.audio_channels} ch, "
+            f"up to {media_info.audio_max_samples_per_chunk} samples/chunk"
+        )
+    else:
+        print("Audio   : disabled (source has no audio stream)")
 
     if rx_metadata:
         print("Backchannel: enabled (receiver -> sender metadata)")
 
-    # Legacy flag kept for CLI compatibility. Server already logs all received messages by default.
     if rx_metadata_log_all:
         print("[info] --rx-metadata-log-all is a legacy compatibility flag (no effect).")
-
-    audio_data = decode_audio_to_array(video_path, audio_sample_rate, audio_channels)
-    audio_enabled = audio_data is not None and audio_data.shape[1] > 0
-
-    if audio_enabled:
-        _configure_audio_frame(sender_plain, audio_sample_rate, audio_channels, audio_samples_per_frame)
-    else:
-        print("[warn] could not start audio decoder; sending video only.")
 
     sender_overlay = None
     if dual:
@@ -519,22 +541,20 @@ def stream_video(
         sender_overlay, _ = make_sender(overlay_name, width, height, fps)
         print(f"NDI name: '{overlay_name}'")
         if audio_enabled:
-            _configure_audio_frame(sender_overlay, audio_sample_rate, audio_channels, audio_samples_per_frame)
+            _configure_audio_frame(
+                sender_overlay,
+                media_info.audio_sample_rate,
+                media_info.audio_channels,
+                media_info.audio_max_samples_per_chunk,
+            )
 
     print("Press Ctrl-C to stop.\n")
 
-    frame_idx = 0
-    dropped_timing_count = 0
-    audio_pos = 0
-    total_audio_samples = int(audio_data.shape[1]) if audio_enabled else 0
+    video_frame_idx = 0
+    playback_start_monotonic = None
+    first_media_time_seconds = None
+    late_count = 0
 
-    frame_bytes = width * height * 4
-    video_proc = start_video_decoder(video_path)
-    if video_proc.stdout is None:
-        print("Error: failed to start video decoder stdout pipe.")
-        sys.exit(1)
-
-    clock = MonotonicFrameClock(fps_float)
     backchannel = None
     dispatcher = None
     viewport_handler = None
@@ -571,74 +591,51 @@ def stream_video(
 
         try:
             while True:
-                raw = read_exact(video_proc.stdout, frame_bytes)
-                if raw is None:
-                    if video_proc.poll() is None:
-                        video_proc.terminate()
-                    video_proc = start_video_decoder(video_path)
-                    if video_proc.stdout is None:
-                        print("Error: failed to restart video decoder.")
-                        break
-
-                    clock.reset()
-                    audio_pos = 0
-                    raw = read_exact(video_proc.stdout, frame_bytes)
-                    if raw is None:
-                        print("Error: failed to read first frame after decoder restart")
-                        break
-
                 if backchannel is not None and dispatcher is not None:
                     messages = backchannel.drain(max_messages=32)
                     if messages:
                         dispatcher.dispatch_many(messages)
 
-                # frombuffer(raw, ...) over bytes is read-only; cyndilib expects writable memory
-                bgra = np.frombuffer(raw, dtype=np.uint8).copy().reshape((height, width, 4))
-                if viewport_handler is not None and viewport_handler.state.latest is not None:
-                    age = time.monotonic() - viewport_handler.state.last_update_monotonic
-                    if age <= viewport_stale_timeout_seconds:
-                        _draw_viewport_roi(bgra, viewport_handler.state.latest)
-                plain_frame = bgra.ravel()
+                event = media_reader.read_next()
+                if event is None:
+                    print("Error: failed to decode media event.")
+                    break
 
-                if audio_enabled and total_audio_samples > 0:
-                    end_pos = audio_pos + audio_samples_per_frame
-                    if end_pos <= total_audio_samples:
-                        audio_frame = audio_data[:, audio_pos:end_pos].copy()
-                        audio_pos = end_pos
-                        if audio_pos >= total_audio_samples:
-                            audio_pos = 0
-                    else:
-                        first = audio_data[:, audio_pos:total_audio_samples]
-                        remain = end_pos - total_audio_samples
-                        second = audio_data[:, 0:remain]
-                        audio_frame = np.concatenate((first, second), axis=1).copy()
-                        audio_pos = remain
+                if playback_start_monotonic is None or first_media_time_seconds is None:
+                    playback_start_monotonic = time.monotonic()
+                    first_media_time_seconds = event.media_time_seconds
 
-                    sender_plain.write_video_and_audio(plain_frame, audio_frame)
+                playback_start_monotonic, late_count = _wait_until_media_deadline(
+                    playback_start_monotonic,
+                    first_media_time_seconds,
+                    event.media_time_seconds,
+                    late_count,
+                )
+
+                if isinstance(event, MediaVideoEvent):
+                    bgra = np.array(event.frame_bgra, copy=True)
+                    if viewport_handler is not None and viewport_handler.state.latest is not None:
+                        age = time.monotonic() - viewport_handler.state.last_update_monotonic
+                        if age <= viewport_stale_timeout_seconds:
+                            _draw_viewport_roi(bgra, viewport_handler.state.latest)
+
+                    plain_frame = bgra.ravel()
+                    sender_plain.write_video(plain_frame)
 
                     if sender_overlay is not None:
                         bgra_sq = np.array(bgra, copy=True)
-                        draw_square(bgra_sq, frame_idx)
+                        draw_square(bgra_sq, video_frame_idx)
                         overlay_frame = bgra_sq.ravel()
-                        sender_overlay.write_video_and_audio(overlay_frame, audio_frame)
-                else:
-                    sender_plain.write_video_async(plain_frame)
+                        sender_overlay.write_video(overlay_frame)
+
+                    video_frame_idx += 1
+                    continue
+
+                if isinstance(event, MediaAudioEvent):
+                    sender_plain.write_audio(event.samples)
                     if sender_overlay is not None:
-                        bgra_sq = np.array(bgra, copy=True)
-                        draw_square(bgra_sq, frame_idx)
-                        overlay_frame = bgra_sq.ravel()
-                        sender_overlay.write_video_async(overlay_frame)
-
-                frame_idx += 1
-
-                overrun = clock.wait_next()
-                if overrun > 0:
-                    dropped_timing_count += 1
-                    if dropped_timing_count % 120 == 0:
-                        print(
-                            f"[warn] timing late {dropped_timing_count} times "
-                            f"(latest overrun: {overrun * 1000:.2f} ms)"
-                        )
+                        sender_overlay.write_audio(event.samples)
+                    continue
 
         except KeyboardInterrupt:
             print("\nStopped by user.")
@@ -659,8 +656,7 @@ def stream_video(
                 if backchannel.last_error:
                     print(f"[warn] backchannel last error: {backchannel.last_error}")
 
-            if video_proc.poll() is None:
-                video_proc.terminate()
+            media_reader.close()
             if sender_overlay is not None:
                 sender_overlay.__exit__(None, None, None)
 
