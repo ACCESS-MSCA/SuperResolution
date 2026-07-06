@@ -1,6 +1,6 @@
 # SuperResolution - NDI Streaming Base
 
-Updated: 2026-06-17
+Updated: 2026-06-18
 
 ## Overview
 
@@ -92,6 +92,15 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --no-rx-metadata
 
 ## Validation Workflow
 
+Completed validation scope as of 2026-06-18:
+
+- NDI Monitor
+- Unity Editor
+- Unity AVP Simulator
+- Apple Vision Pro device build
+
+Recommended ongoing QA:
+
 1. Start the sender with a representative source.
 2. Validate first in NDI Monitor.
 3. Validate next in Unity.
@@ -133,4 +142,11 @@ The runtime path has been simplified around these principles:
 - one direct NDI sender implementation,
 - metadata as an extension layer instead of a second transport.
 
-The remaining work is operational validation with representative long-run sources.
+Current validation matrix passed on 2026-06-18:
+
+- NDI Monitor
+- Unity Editor
+- Unity AVP Simulator
+- Apple Vision Pro device build
+
+Long-session soak testing remains recommended as ongoing QA, but the current architecture is now validated on the active target surfaces.

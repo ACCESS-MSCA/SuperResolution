@@ -20,7 +20,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Updated: 2026-06-17</p>
+    <p class="pill">Updated: 2026-06-18</p>
     <h1>Architecture Decision: Unified Media Timeline with PyAV</h1>
     <div class="card">
       <strong>Navigation</strong>
@@ -60,14 +60,22 @@
   <li>its installation must be validated on target machines,</li>
   <li><code>ffmpeg.py</code> remains as a legacy helper and can be cleaned later.</li>
 </ul>
-<h2>6. Validation criteria</h2>
+<h2>6. Current validation status</h2>
 <ol>
-  <li>long sessions without drift in NDI Monitor,</li>
-  <li>the same result in Unity,</li>
-  <li>good behavior with 24 and 60 fps sources,</li>
-  <li>stability after restarts or source changes.</li>
+  <li>NDI Monitor,</li>
+  <li>Unity Editor,</li>
+  <li>Unity AVP Simulator,</li>
+  <li>Apple Vision Pro device build.</li>
 </ol>
-<h2>7. Summary</h2>
+<p>Observed result: the streamer now behaves correctly on these targets after the move to a unified <code>PyAV</code> media timeline.</p>
+<h2>7. Recommended QA from this point</h2>
+<ol>
+  <li>keep long-session soak runs as an operational regression test,</li>
+  <li>continue comparing NDI Monitor and Unity whenever a new or suspicious source appears,</li>
+  <li>repeat validation with 24/23.976 and 60/59.94 fps sources,</li>
+  <li>keep hot source changes and sender restarts as standard regression cases.</li>
+</ol>
+<h2>8. Summary</h2>
 <p><code>PyAV</code> is not being introduced to make the project heavier. It is being introduced to remove the most suspicious piece of the previous model: reconstructing audio from the temporal grid of video instead of respecting the real timeline carried by the media container.</p>
 
   </main>

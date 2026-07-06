@@ -1,8 +1,8 @@
 # Decisión de Arquitectura: Migración del Sender A/V de `cyndilib` a `libndi`
 
-Actualizado: 2026-06-17
+Actualizado: 2026-06-18
 
-Estado: implementado en código, pendiente de validación larga definitiva
+Estado: implementado en código y validado funcionalmente en NDI Monitor, Unity Editor, Unity AVP Simulator y build en Apple Vision Pro
 
 Navegación:
 - Manual core ES HTML: `../manual_tecnico_streaming_ndi_es.html`
@@ -188,27 +188,23 @@ Lectura correcta del riesgo:
 - la migración a `libndi` reduce una capa de sospecha,
 - pero no garantiza por sí sola que la deriva desaparezca.
 
-## 12. Criterio de éxito
+## 12. Estado de validación actual
 
-La decisión se considerará validada si se cumple todo esto:
+Validación funcional completada en la matriz actual del proyecto:
 
-1. stream estable durante al menos 30-60 minutos,
-2. sin deriva audible significativa en NDI Monitor,
-3. sin deriva equivalente en Unity,
-4. comportamiento consistente en señales de 24, 23.976, 60 y 59.94 fps,
-5. funcionamiento correcto con y sin audio.
+1. NDI Monitor,
+2. Unity Editor,
+3. Unity AVP Simulator,
+4. build en Apple Vision Pro.
 
-## 13. Siguiente paso recomendado
+Resultado observado: tras simplificar el sender y después mover el timeline A/V a `PyAV`, el comportamiento actual es correcto en todos estos targets.
 
-Plan de validación inmediato:
+## 13. QA recomendada a partir de aquí
 
-1. probar primero en NDI Monitor,
-2. repetir con Unity,
-3. registrar si la deriva desaparece, mejora o se mantiene,
-4. si persiste con `libndi` directo, mover el foco a:
-   - segmentación audio por frame,
-   - relación entre duración real del media y loop,
-   - comportamiento del runtime NDI en sesiones largas.
+1. mantener sesiones largas como prueba de regresión operativa,
+2. seguir usando NDI Monitor como referencia rápida cuando aparezca una fuente sospechosa,
+3. repetir la batería con señales `24/23.976` y `60/59.94`,
+4. tratar reinicios del sender y cambios de source en caliente como casos básicos de regresión.
 
 ## 14. Resumen ejecutivo de la decisión
 

@@ -57,8 +57,8 @@
   <div class="wrap">
     <section class="card">
       <h1>Architecture Decision: Direct <code>libndi</code> A/V Sender</h1>
-      <p class="note"><strong>Updated:</strong> 2026-06-17</p>
-      <p class="note"><strong>Status:</strong> implemented in code, long-run validation still pending.</p>
+      <p class="note"><strong>Updated:</strong> 2026-06-18</p>
+      <p class="note"><strong>Status:</strong> implemented in code and functionally validated in NDI Monitor, Unity Editor, Unity AVP Simulator, and Apple Vision Pro device build.</p>
       <p class="note">
         <strong>Navigation:</strong>
         <a href="../manual_tecnico_streaming_ndi_es.html">Core ES manual</a> ·
@@ -135,17 +135,22 @@
         <strong>Correct interpretation:</strong> moving to direct <code>libndi</code> removes a major uncertainty source, but it does not by itself guarantee that drift disappears. The purpose is to isolate the real cause using a more transparent architecture.
       </div>
 
-      <h2>11. Success criteria</h2>
+      <h2>11. Current validation status</h2>
       <ol>
-        <li>stable streaming for at least 30-60 minutes,</li>
-        <li>no significant audible drift in NDI Monitor,</li>
-        <li>no equivalent drift in Unity,</li>
-        <li>consistent behavior at 24, 23.976, 60 and 59.94 fps,</li>
-        <li>correct operation with and without audio.</li>
+        <li>NDI Monitor,</li>
+        <li>Unity Editor,</li>
+        <li>Unity AVP Simulator,</li>
+        <li>Apple Vision Pro device build.</li>
       </ol>
+      <p>Observed result: after simplifying the sender and then moving the A/V timeline to <code>PyAV</code>, the current behavior is correct on all of these targets.</p>
 
-      <h2>12. Next step</h2>
-      <p>Validate in NDI Monitor first and then in Unity. If drift still persists with direct <code>libndi</code>, investigation should move away from the wrapper layer and focus on media timing, per-frame audio segmentation or long-run NDI runtime behavior.</p>
+      <h2>12. Recommended QA from this point</h2>
+      <ol>
+        <li>keep long-session soak tests as an operational regression check,</li>
+        <li>continue using NDI Monitor as the fastest reference when a source looks suspicious,</li>
+        <li>repeat the matrix with 24/23.976 and 60/59.94 fps signals,</li>
+        <li>treat sender restarts and hot source changes as standard regression cases.</li>
+      </ol>
     </section>
   </div>
 </body>

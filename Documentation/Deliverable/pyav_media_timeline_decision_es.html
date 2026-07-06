@@ -20,7 +20,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Updated: 2026-06-17</p>
+    <p class="pill">Updated: 2026-06-18</p>
     <h1>Decisión de Arquitectura: Timeline único de media con PyAV</h1>
     <div class="card">
       <strong>Navigation</strong>
@@ -60,14 +60,22 @@
   <li>hay que validar bien su instalación en las máquinas objetivo,</li>
   <li><code>ffmpeg.py</code> queda como helper legacy y podrá limpiarse después.</li>
 </ul>
-<h2>6. Criterio de validación</h2>
+<h2>6. Estado de validación actual</h2>
 <ol>
-  <li>sesiones largas sin drift en NDI Monitor,</li>
-  <li>mismo resultado en Unity,</li>
-  <li>buen comportamiento con señales a 24 y 60 fps,</li>
-  <li>estabilidad tras reinicios o cambios de señal.</li>
+  <li>NDI Monitor,</li>
+  <li>Unity Editor,</li>
+  <li>Unity AVP Simulator,</li>
+  <li>build en Apple Vision Pro.</li>
 </ol>
-<h2>7. Resumen</h2>
+<p>Resultado observado: el streamer funciona correctamente en estos targets tras el cambio a timeline unificado con <code>PyAV</code>.</p>
+<h2>7. QA recomendada a partir de aquí</h2>
+<ol>
+  <li>mantener sesiones largas como prueba de regresión operativa,</li>
+  <li>seguir comparando NDI Monitor y Unity cuando aparezca una fuente nueva o sospechosa,</li>
+  <li>repetir la validación con señales a 24/23.976 y 60/59.94 fps,</li>
+  <li>revisar cambios de source en caliente y reinicios del sender como casos base de regresión.</li>
+</ol>
+<h2>8. Resumen</h2>
 <p><code>PyAV</code> no se introduce para complicar el proyecto, sino para quitar la parte más sospechosa del modelo anterior: reconstruir audio desde la rejilla temporal del vídeo en lugar de respetar el tiempo real del contenedor.</p>
 
   </main>

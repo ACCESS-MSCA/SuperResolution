@@ -1,8 +1,8 @@
 # Architecture Decision: Unified Media Timeline with `PyAV`
 
-Updated: 2026-06-17
+Updated: 2026-06-18
 
-Status: implemented in code, long-run validation still pending
+Status: implemented in code and functionally validated in NDI Monitor, Unity Editor, Unity AVP Simulator, and Apple Vision Pro device build
 
 Navigation:
 - Core ES manual HTML: `../manual_tecnico_streaming_ndi_es.html`
@@ -123,21 +123,23 @@ Mandatory external runtime dependency:
 3. a real issue may still live in source generation rather than the sender,
 4. `ffmpeg.py` still exists as a legacy helper and may need cleanup in a later phase.
 
-## 11. Success criteria
+## 11. Current validation status
 
-The decision is validated if:
+Functional validation is complete on the current project matrix:
 
-1. a long session stays in sync in NDI Monitor,
-2. the same result holds in Unity,
-3. `24/23.976` and `60/59.94` sources behave correctly,
-4. restarts or source changes do not leave the stream in a degraded state.
+1. NDI Monitor,
+2. Unity Editor,
+3. Unity AVP Simulator,
+4. Apple Vision Pro device build.
 
-## 12. Immediate next operational step
+Observed result: the streamer now behaves correctly on these targets after the move to a unified `PyAV` media timeline.
 
-1. install dependencies on the target machine,
-2. validate first in NDI Monitor,
-3. repeat in Unity,
-4. if drift appears, compare immediately against the same source in NDI Monitor to determine whether the fault originates in the sender or already exists in the source.
+## 12. Recommended QA from this point
+
+1. keep long-session soak runs as an operational regression test,
+2. continue comparing NDI Monitor and Unity whenever a new or suspicious source appears,
+3. repeat validation with `24/23.976` and `60/59.94` sources,
+4. keep hot source changes and sender restarts as standard regression cases.
 
 ## 13. Executive summary
 

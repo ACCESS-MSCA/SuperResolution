@@ -1,8 +1,8 @@
 # Decisión de Arquitectura: Timeline único de media con `PyAV`
 
-Actualizado: 2026-06-17
+Actualizado: 2026-06-18
 
-Estado: implementado en código, pendiente de validación larga definitiva
+Estado: implementado en código y validado funcionalmente en NDI Monitor, Unity Editor, Unity AVP Simulator y build en Apple Vision Pro
 
 Navegación:
 - Manual core ES HTML: `../manual_tecnico_streaming_ndi_es.html`
@@ -123,21 +123,23 @@ Dependencia runtime externa:
 3. que todavía quede un problema real en la generación de la fuente y no en el sender,
 4. que `ffmpeg.py` siga existiendo como helper legacy y deba limpiarse en una fase posterior.
 
-## 11. Criterio de éxito
+## 11. Estado de validación actual
 
-La decisión queda validada si:
+Validación funcional completada en la matriz actual del proyecto:
 
-1. una sesión larga no deriva en NDI Monitor,
-2. el mismo resultado se mantiene en Unity,
-3. señales `24/23.976` y `60/59.94` se comportan bien,
-4. reinicios o cambios de señal no dejan el stream en un estado degradado.
+1. NDI Monitor,
+2. Unity Editor,
+3. Unity AVP Simulator,
+4. build en Apple Vision Pro.
 
-## 12. Siguiente paso operativo
+Resultado observado: el streamer funciona correctamente en estos targets tras el cambio a timeline unificado con `PyAV`.
 
-1. instalar dependencias en la máquina de prueba,
-2. validar primero en NDI Monitor,
-3. repetir después en Unity,
-4. si aparece drift, comparar inmediatamente contra la misma fuente en NDI Monitor para decidir si el fallo nace en el sender o ya viene en origen.
+## 12. QA recomendada a partir de aquí
+
+1. mantener sesiones largas como prueba de regresión operativa,
+2. seguir comparando NDI Monitor y Unity cuando aparezca una fuente nueva o sospechosa,
+3. repetir la validación con señales `24/23.976` y `60/59.94`,
+4. revisar cambios de source en caliente y reinicios del sender como casos base de regresión.
 
 ## 13. Resumen ejecutivo
 

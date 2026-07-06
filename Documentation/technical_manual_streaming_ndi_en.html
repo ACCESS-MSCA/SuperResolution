@@ -32,7 +32,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Updated: 2026-06-17</p>
+    <p class="pill">Updated: 2026-06-18</p>
     <h1>Technical Manual - SuperResolution NDI Streaming</h1>
     <p>This manual describes the current Python NDI streamer implementation. The primary architectural goal is stable long-run A/V sync with fewer opaque layers and a clear extension path for features such as Unity-driven viewport overlays.</p>
 
@@ -115,6 +115,14 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
 python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
 
     <h2>8. Recommended QA</h2>
+    <p>Validation matrix already passed on 2026-06-18:</p>
+    <ul>
+      <li>NDI Monitor</li>
+      <li>Unity Editor</li>
+      <li>Unity AVP Simulator</li>
+      <li>Apple Vision Pro device build</li>
+    </ul>
+    <p>Recommended ongoing QA from this point:</p>
     <ol>
       <li>Validate first in NDI Monitor.</li>
       <li>Repeat next in Unity.</li>
@@ -136,7 +144,15 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
     </table>
 
     <h2>10. Current status</h2>
-    <p>The base architecture is now organized around a cleaner foundation: direct sender, unified media timeline and metadata as an extension layer. The real acceptance criterion from here is long-run validation with representative sources.</p>
+    <p>The base architecture is now organized around a cleaner foundation: direct sender, unified media timeline and metadata as an extension layer.</p>
+    <p>Functional validation is complete on the current matrix:</p>
+    <ul>
+      <li>NDI Monitor</li>
+      <li>Unity Editor</li>
+      <li>Unity AVP Simulator</li>
+      <li>Apple Vision Pro device build</li>
+    </ul>
+    <p>Long-session soak tests remain recommended as ongoing QA practice, but the current architecture is now validated on the project's active target surfaces.</p>
   </main>
 </body>
 </html>

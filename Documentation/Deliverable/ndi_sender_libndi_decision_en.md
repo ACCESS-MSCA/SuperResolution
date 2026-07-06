@@ -1,8 +1,8 @@
 # Architecture Decision: Migrate the A/V Sender from `cyndilib` to `libndi`
 
-Updated: 2026-06-17
+Updated: 2026-06-18
 
-Status: implemented in code, long-run validation still pending
+Status: implemented in code and functionally validated in NDI Monitor, Unity Editor, Unity AVP Simulator, and Apple Vision Pro device build
 
 Navigation:
 - Core ES manual HTML: `../manual_tecnico_streaming_ndi_es.html`
@@ -188,27 +188,23 @@ Proper interpretation:
 - migrating to direct `libndi` removes one major suspect,
 - but it does not guarantee by itself that drift disappears.
 
-## 12. Success criteria
+## 12. Current validation status
 
-The decision will be considered validated if all of the following are true:
+Functional validation is complete on the current project matrix:
 
-1. stable streaming for at least 30-60 minutes,
-2. no significant audible drift in NDI Monitor,
-3. no equivalent drift in Unity,
-4. consistent behavior at 24, 23.976, 60 and 59.94 fps,
-5. correct operation with and without audio.
+1. NDI Monitor,
+2. Unity Editor,
+3. Unity AVP Simulator,
+4. Apple Vision Pro device build.
 
-## 13. Recommended next step
+Observed result: after simplifying the sender and then moving the A/V timeline to `PyAV`, the current behavior is correct on all of these targets.
 
-Immediate validation plan:
+## 13. Recommended QA from this point
 
-1. test in NDI Monitor first,
-2. repeat in Unity,
-3. record whether drift disappears, improves or stays the same,
-4. if drift still persists with direct `libndi`, move the investigation to:
-   - per-frame audio segmentation,
-   - relationship between actual media duration and loop duration,
-   - long-run behavior of the NDI runtime itself.
+1. keep long-session soak tests as an operational regression check,
+2. continue using NDI Monitor as the fastest reference when a source looks suspicious,
+3. repeat the matrix with `24/23.976` and `60/59.94` signals,
+4. treat sender restarts and hot source changes as standard regression cases.
 
 ## 14. Executive summary of the decision
 

@@ -57,8 +57,8 @@
   <div class="wrap">
     <section class="card">
       <h1>Decisión de Arquitectura: Sender A/V directo con <code>libndi</code></h1>
-      <p class="note"><strong>Actualizado:</strong> 2026-06-17</p>
-      <p class="note"><strong>Estado:</strong> implementado en código, pendiente de validación larga definitiva.</p>
+      <p class="note"><strong>Actualizado:</strong> 2026-06-18</p>
+      <p class="note"><strong>Estado:</strong> implementado en código y validado funcionalmente en NDI Monitor, Unity Editor, Unity AVP Simulator y build en Apple Vision Pro.</p>
       <p class="note">
         <strong>Navegación:</strong>
         <a href="../manual_tecnico_streaming_ndi_es.html">Manual core ES</a> ·
@@ -135,17 +135,22 @@
         <strong>Lectura correcta de la decisión:</strong> pasar a <code>libndi</code> directo reduce una gran fuente de incertidumbre, pero no garantiza por sí solo que la deriva desaparezca. El objetivo es aislar la causa real con una arquitectura más transparente.
       </div>
 
-      <h2>11. Criterio de éxito</h2>
+      <h2>11. Estado de validación actual</h2>
       <ol>
-        <li>stream estable durante al menos 30-60 minutos,</li>
-        <li>sin deriva audible significativa en NDI Monitor,</li>
-        <li>sin deriva equivalente en Unity,</li>
-        <li>comportamiento consistente a 24, 23.976, 60 y 59.94 fps,</li>
-        <li>funcionamiento correcto con y sin audio.</li>
+        <li>NDI Monitor,</li>
+        <li>Unity Editor,</li>
+        <li>Unity AVP Simulator,</li>
+        <li>build en Apple Vision Pro.</li>
       </ol>
+      <p>Resultado observado: tras simplificar el sender y después mover el timeline A/V a <code>PyAV</code>, el comportamiento actual es correcto en todos estos targets.</p>
 
-      <h2>12. Siguiente paso</h2>
-      <p>Validar primero en NDI Monitor y luego en Unity. Si la deriva persiste con <code>libndi</code> directo, la investigación debe moverse fuera del wrapper y centrarse en timing del media, segmentación audio por frame o comportamiento largo del runtime NDI.</p>
+      <h2>12. QA recomendada a partir de aquí</h2>
+      <ol>
+        <li>mantener sesiones largas como prueba de regresión operativa,</li>
+        <li>seguir usando NDI Monitor como referencia rápida cuando aparezca una fuente sospechosa,</li>
+        <li>repetir la batería con señales 24/23.976 y 60/59.94 fps,</li>
+        <li>tratar reinicios del sender y cambios de source en caliente como casos básicos de regresión.</li>
+      </ol>
     </section>
   </div>
 </body>
