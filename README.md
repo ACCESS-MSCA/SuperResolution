@@ -1,6 +1,6 @@
 # SuperResolution - NDI Streaming Base
 
-Updated: 2026-06-18
+Updated: 2026-07-06
 
 ## Overview
 
@@ -14,6 +14,24 @@ Current runtime architecture is intentionally narrow:
 - Unity metadata is received through NDI metadata frames and can be drawn back into the outgoing video.
 
 The main technical goal is long-run A/V stability without building extra corrective layers around the sender.
+
+## Delivery Quick Start
+
+For first-time setup and validation:
+
+1. Follow `Documentation/setup_and_run_en.md` to install Python dependencies, validate `libndi`, and run the streamer.
+2. Confirm the `StreamNDI` source in NDI Monitor before adding Unity.
+3. Launch the supplied Unity Simulator build and connect it to the Python NDI source.
+4. Run with metadata logging:
+
+   ```bash
+   python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
+   ```
+
+5. Confirm `[RX Viewport]` lines appear in the Python console.
+6. Use `Documentation/unity_viewport_metadata_contract_en.md` as the field-level contract for gaze/viewport metadata.
+
+Additional delivery context is available in `Documentation/Deliverable/unity_gaze_metadata_handoff_en.md`.
 
 ## Current Architecture
 
@@ -46,6 +64,10 @@ Important design choices:
 | `integrations/unity/` | Unity metadata parsing and viewport interpretation |
 | `Launchers/` | Convenience launchers for local workflows |
 | `Documentation/` | Technical manuals and architecture decisions |
+| `Documentation/index_en.md` | Documentation map in English |
+| `Documentation/index_es.md` | Documentation map in Spanish |
+| `Documentation/setup_and_run_en.md` | Installation, first run, and Unity Simulator validation |
+| `Documentation/unity_viewport_metadata_contract_en.md` | Gaze/viewport metadata contract for Python consumers |
 
 Note on `ffmpeg.py`:
 - it is no longer part of the runtime streaming path.
@@ -79,6 +101,8 @@ Observed development context during this refactor:
 cd <project-root>
 python3 -m pip install -r requirements.txt
 ```
+
+For a full first-time setup, including virtual environment and NDI runtime checks, use `Documentation/setup_and_run_en.md`.
 
 ## Run
 
@@ -126,8 +150,18 @@ Recommended ongoing QA:
 
 Current important decisions are documented here:
 
+- `Documentation/index_en.md`
+- `Documentation/index_es.md`
+- `Documentation/setup_and_run_en.md`
+- `Documentation/setup_and_run_es.md`
+- `Documentation/unity_viewport_metadata_contract_en.md`
+- `Documentation/unity_viewport_metadata_contract_es.md`
 - `Documentation/manual_tecnico_streaming_ndi_es.html`
+- `Documentation/manual_tecnico_streaming_ndi_es.md`
 - `Documentation/technical_manual_streaming_ndi_en.html`
+- `Documentation/technical_manual_streaming_ndi_en.md`
+- `Documentation/Deliverable/unity_gaze_metadata_handoff_es.md`
+- `Documentation/Deliverable/unity_gaze_metadata_handoff_en.md`
 - `Documentation/Deliverable/ndi_sender_libndi_decision_es.md`
 - `Documentation/Deliverable/ndi_sender_libndi_decision_en.md`
 - `Documentation/Deliverable/pyav_media_timeline_decision_es.md`

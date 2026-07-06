@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Setup and Run Guide</title>
+  <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:0;background:#0f172a;color:#e5e7eb}main{max-width:960px;margin:0 auto;padding:40px 24px}a{color:#93c5fd}code,pre{background:#111827;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #334155;padding:8px;text-align:left}.card{border:1px solid #334155;background:#111827;border-radius:8px;padding:16px;margin:16px 0}</style>
+</head>
+<body><main>
+  <p>Updated: 2026-07-06</p>
+  <h1>Setup and Run Guide</h1>
+  <div class="card">Navigation: <a href="index_en.html">Index</a> · <a href="setup_and_run_es.html">ES</a> · <a href="setup_and_run_en.md">Markdown</a></div>
+  <p>This guide covers first-time installation, runtime checks, and validation with NDI Monitor and the supplied Unity Simulator build.</p>
+  <h2>What This Project Runs</h2>
+  <p><code>SuperResolution</code> publishes an NDI video/audio source from Python and can receive Unity metadata through the NDI sender backchannel. Unity reports gaze/viewport state as <code>access_viewport</code> metadata, and Python parses it into <code>UnityViewportMetadata</code>.</p>
+  <pre>media file -> PyAV LoopingMediaReader -> stream_video.py scheduler
+    -> NativeNdiSender/libndi -> NDI source visible to Unity and NDI Monitor
+    <- Unity NDI metadata backchannel with gaze/viewport state</pre>
+  <h2>Requirements</h2>
+  <ul><li>macOS host.</li><li>Python 3.11 was used during development.</li><li>NDI Runtime or NDI SDK installed so <code>libndi</code> is visible to Python.</li><li>Network/firewall settings that allow NDI discovery between Python, NDI Monitor, and Unity.</li></ul>
+  <p>Pinned Python dependencies:</p>
+  <pre>numpy==2.3.5
+av==17.1.0</pre>
+  <p><code>stream_video.py</code> uses PyAV for media decode. A separate system <code>ffmpeg</code> install is not part of the main runtime path, but can still be useful for diagnostics or legacy/offline tooling.</p>
+  <h2>Install</h2>
+  <pre>python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt</pre>
+  <h2>Check NDI Runtime Visibility</h2>
+  <pre>python3 -c "from ndi_native import get_ndi_runtime; rt = get_ndi_runtime(); print(rt.lib.NDIlib_version().decode('utf-8', errors='replace'))"</pre>
+  <p>Expected result: a printed NDI runtime version, for example <code>NDI SDK APPLE ...</code>. Common failure: <code>Could not load NDI runtime library</code>. Action: install the NDI Runtime/SDK and make sure <code>libndi</code> can be found by the Python process.</p>
+  <h2>Run the Streamer</h2>
+  <pre>python3 stream_video.py
+python3 stream_video.py Videos/big_buck_bunny.mp4
+python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
+python3 stream_video.py Videos/big_buck_bunny.mp4 --no-rx-metadata
+python3 stream_video.py Videos/big_buck_bunny.mp4 --dual</pre>
+  <p>By default, the primary NDI source name is <code>StreamNDI</code>.</p>
+  <h2>Validate Without Unity</h2>
+  <ol><li>Start the Python streamer.</li><li>Open NDI Monitor.</li><li>Confirm that <code>StreamNDI</code> appears.</li><li>Confirm video playback is visible and audio is present when the source has audio.</li><li>Leave the stream running for a representative duration if long-session behavior matters.</li></ol>
+  <h2>Validate With the Unity Simulator Build</h2>
+  <ol><li>Start the Python streamer with metadata enabled: <code>python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</code></li><li>Launch the provided Unity Simulator build.</li><li>Connect the Unity NDI receiver to <code>StreamNDI</code>.</li><li>Move the simulated view/head so the NDI surface is visible.</li><li>Watch the Python console.</li></ol>
+  <pre>[info] backchannel receiver started
+[RX Viewport] seq=12 scene=NDI uv=(0.123,0.234)-(0.456,0.678) hit_any=1 plane_intersection=1 poly_n=4 gaze_hit=1 gaze_uv=(0.321,0.456)</pre>
+  <h2>How Python Receives Unity Metadata</h2>
+  <ul><li><code>extensions/backchannel/receiver.py</code>: captures NDI metadata frames from the active sender.</li><li><code>extensions/backchannel/dispatcher.py</code>: dispatches parsed XML messages.</li><li><code>integrations/unity/parsers.py</code>: converts <code>access_viewport</code> XML into <code>UnityViewportMetadata</code>.</li><li><code>integrations/unity/handlers.py</code>: keeps the latest viewport state.</li><li><code>stream_video.py</code>: draws the debug viewport overlay when recent metadata exists.</li></ul>
+  <p>The current debug overlay stale timeout in <code>stream_video.py</code> is 3 seconds.</p>
+  <h2>Troubleshooting</h2>
+  <table><thead><tr><th>Symptom</th><th>Likely cause</th><th>Action</th></tr></thead><tbody><tr><td>Python cannot start NDI</td><td><code>libndi</code> is not visible</td><td>Install NDI Runtime/SDK and rerun the runtime visibility check</td></tr><tr><td>NDI Monitor does not show <code>StreamNDI</code></td><td>NDI runtime, firewall, LAN discovery, or sender not running</td><td>Check console output, same network segment, and host firewall</td></tr><tr><td>Unity does not see the source</td><td>NDI discovery or source selection</td><td>Confirm NDI Monitor sees it first, then reconnect Unity to <code>StreamNDI</code></td></tr><tr><td>Python shows no <code>[RX Viewport]</code> logs</td><td>Unity metadata sender is not connected or stale</td><td>Run with <code>--rx-metadata-verbose</code>, inspect Unity metadata provider/sender</td></tr><tr><td>Gaze marker jumps to a corner</td><td><code>gaze_hit</code> validity was not checked</td><td>Treat <code>gaze_uv</code> as valid only when <code>gaze_hit</code> is true</td></tr><tr><td>ERP/360 ROI is wrong around the seam</td><td>Consumer used only <code>uv_min/uv_max</code></td><td>Use ERP-aware geometry from the metadata contract</td></tr></tbody></table>
+  <h2>Related Documents</h2>
+  <ul><li><a href="unity_viewport_metadata_contract_en.html">Unity viewport metadata contract</a></li><li><a href="Deliverable/unity_gaze_metadata_handoff_en.html">Unity gaze metadata handoff</a></li><li><a href="technical_manual_streaming_ndi_en.html">Technical manual</a></li></ul>
+</main></body></html>

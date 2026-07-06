@@ -26,6 +26,7 @@ class UnityTransformMetadata:
 
 @dataclass(frozen=True)
 class UnityViewportMetadata:
+    schema_version: int
     source_id: str
     sequence: int
     scene: str
@@ -124,6 +125,7 @@ def try_parse_unity_viewport(message: NdiMetadataMessage) -> Optional[UnityViewp
         poly.append((_f(f"uv_poly{i}_x"), _f(f"uv_poly{i}_y")))
 
     return UnityViewportMetadata(
+        schema_version=_i("schema_version", 0),
         source_id=attrs.get("id", ""),
         sequence=_i("seq"),
         scene=attrs.get("scene", ""),
