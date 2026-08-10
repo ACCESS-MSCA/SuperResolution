@@ -1,0 +1,13 @@
+#!/bin/zsh
+set -euo pipefail
+
+APP_BUNDLE="${0:A:h:h:h}"
+LAUNCHERS_DIR="${APP_BUNDLE:h:h}"
+COMMAND="$LAUNCHERS_DIR/Stream_NDI_Default_8K.command"
+
+if [[ ! -x "$COMMAND" ]]; then
+  /usr/bin/osascript -e "display alert \"Stream NDI Default\" message \"No encuentro el launcher: $COMMAND\""
+  exit 1
+fi
+
+/usr/bin/open -a Terminal "$COMMAND"

@@ -9,18 +9,29 @@ Usage:
     python stream_video.py <path_to_video> --rx-metadata-verbose
     python stream_video.py <path_to_video> --rx-metadata-log-all
     python stream_video.py <path_to_video> --no-rx-metadata
+    python stream_video.py <path_to_video> --uyvy
+    python stream_video.py <path_to_video> --diagnostics
+    python stream_video.py <path_to_video> --diagnostics-file Logs/run.jsonl
+    python stream_video.py <path_to_video> --source-name StreamNDI-Test
+    python stream_video.py <path_to_video> --video-prefetch-frames 4 --preload-audio
 """
 
 from __future__ import annotations
 
+import json
+import queue
+import subprocess
 import sys
+import threading
 import time
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 
+from ndi_native import get_ndi_runtime
 from extensions.backchannel import MetadataDispatcher, NdiSenderBackchannelReceiver
 from integrations.unity import UnityTransformLogHandler, UnityViewportMetadata, UnityViewportStateHandler
-from media_reader import LoopingMediaReader, MediaAudioEvent, MediaVideoEvent
 from utils import draw_square, make_sender
 
 _ERP_ROI_MASK_CACHE: dict[tuple, np.ndarray] = {}
@@ -28,6 +39,137 @@ _ROI_POLYGON_MASK_CACHE: dict[tuple, np.ndarray] = {}
 _GAZE_MARKER_RADIUS_PIXELS = 12
 _GAZE_MARKER_THICKNESS_PIXELS = 3
 _ERP_FRUSTUM_EDGE_SAMPLES = 96
+_AUDIO_LATE_WARN_SECONDS = 0.020
+_AUDIO_THREAD_LATE_LOG_INTERVAL = 120
+_VIDEO_AUDIO_FIRST_DROP_SECONDS = 0.050
+_VIDEO_DROP_LOG_INTERVAL = 60
+_DIAGNOSTIC_INTERVAL_SECONDS = 1.0
+_DIAGNOSTIC_VIDEO_GAP_FACTOR = 2.5
+_DIAGNOSTIC_AUDIO_GAP_SECONDS = 0.030
+_DIAGNOSTIC_SEND_WARN_SECONDS = 0.020
+_DIAGNOSTIC_READ_WARN_SECONDS = 0.050
+_AUDIO_PRELOAD_MAX_DURATION_SECONDS = 120.0
+
+
+class _VideoPrefetcher:
+    """Decode video ahead on a bounded worker queue without changing cadence."""
+
+    def __init__(self, reader, capacity: int) -> None:
+        self._reader = reader
+        self._queue = queue.Queue(maxsize=max(1, int(capacity)))
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="NDI Video Decode Prefetch",
+            daemon=True,
+        )
+
+    @property
+    def capacity(self) -> int:
+        return self._queue.maxsize
+
+    @property
+    def depth(self) -> int:
+        return self._queue.qsize()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=3.0)
+
+    def read_next(self):
+        wait_started = time.monotonic()
+        kind, payload, read_ms = self._queue.get()
+        wait_ms = (time.monotonic() - wait_started) * 1000.0
+        if kind == "error":
+            raise payload
+        return payload, read_ms, wait_ms
+
+    def _put(self, item) -> bool:
+        while not self._stop_event.is_set():
+            try:
+                self._queue.put(item, timeout=0.050)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                read_started = time.monotonic()
+                event = self._reader.read_next()
+                read_ms = (time.monotonic() - read_started) * 1000.0
+                if not self._put(("event", event, read_ms)):
+                    return
+        except Exception as exc:
+            self._put(("error", exc, 0.0))
+
+
+class StreamDiagnostics:
+    def __init__(self, enabled: bool, output_path: str | None = None) -> None:
+        self.enabled = bool(enabled)
+        self._lock = threading.Lock()
+        self._start = time.monotonic()
+        self._next_summary = self._start + _DIAGNOSTIC_INTERVAL_SECONDS
+        self.path: Path | None = None
+        self._file = None
+
+        if not self.enabled:
+            return
+
+        if output_path:
+            self.path = Path(output_path)
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.path = Path("Logs") / f"ndi_diagnostics_{stamp}.jsonl"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("a", encoding="utf-8")
+        print(f"[diag] writing diagnostics to {self.path}")
+
+    def close(self) -> None:
+        with self._lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+    def emit(self, event: str, **fields) -> None:
+        if not self.enabled:
+            return
+
+        payload = {
+            "event": event,
+            "elapsed": round(time.monotonic() - self._start, 6),
+            **fields,
+        }
+        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        with self._lock:
+            if self._file is not None:
+                self._file.write(line + "\n")
+                self._file.flush()
+
+    def maybe_summary(self, **fields) -> None:
+        if not self.enabled:
+            return
+
+        now = time.monotonic()
+        if now < self._next_summary:
+            return
+        self._next_summary = now + _DIAGNOSTIC_INTERVAL_SECONDS
+        self.emit("summary", **fields)
+        print(
+            "[diag] "
+            f"t={fields.get('media_time', 0.0):.3f}s "
+            f"video_sent={fields.get('video_sent', 0)} "
+            f"video_drops={fields.get('video_drops', 0)} "
+            f"audio_events={fields.get('audio_events', 0)} "
+            f"audio_late={fields.get('audio_late', 0)} "
+            f"video_gap_ms={fields.get('video_gap_ms_max', 0.0):.2f} "
+            f"send_video_ms={fields.get('video_send_ms_max', 0.0):.2f} "
+            f"send_audio_ms={fields.get('audio_send_ms_max', 0.0):.2f}"
+        )
 
 
 def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples: int) -> None:
@@ -467,8 +609,7 @@ def _wait_until_media_deadline(
     media_time_seconds: float,
     late_count: int,
 ) -> tuple[float, int]:
-    relative_media_time = media_time_seconds - first_media_time_seconds
-    target_time = playback_start_monotonic + relative_media_time
+    target_time = _media_deadline(playback_start_monotonic, first_media_time_seconds, media_time_seconds)
     now = time.monotonic()
     sleep_for = target_time - now
 
@@ -477,7 +618,7 @@ def _wait_until_media_deadline(
         return playback_start_monotonic, late_count
 
     late_seconds = -sleep_for
-    if late_seconds > 0.002:
+    if late_seconds > _AUDIO_LATE_WARN_SECONDS:
         late_count += 1
         if late_count % 120 == 0:
             print(
@@ -486,9 +627,255 @@ def _wait_until_media_deadline(
             )
 
     if late_seconds > 0.250:
+        relative_media_time = media_time_seconds - first_media_time_seconds
         playback_start_monotonic = now - relative_media_time
 
     return playback_start_monotonic, late_count
+
+
+def _media_deadline(
+    playback_start_monotonic: float,
+    first_media_time_seconds: float,
+    media_time_seconds: float,
+) -> float:
+    return playback_start_monotonic + (media_time_seconds - first_media_time_seconds)
+
+
+def _deadline_lateness_seconds(
+    playback_start_monotonic: float,
+    first_media_time_seconds: float,
+    media_time_seconds: float,
+) -> float:
+    deadline = _media_deadline(playback_start_monotonic, first_media_time_seconds, media_time_seconds)
+    return max(0.0, time.monotonic() - deadline)
+
+
+def _send_audio_event(sender_plain, sender_overlay, event) -> None:
+    sender_plain.write_audio(event.samples)
+    if sender_overlay is not None:
+        sender_overlay.write_audio(event.samples)
+
+
+def _preload_audio_events_ffmpeg(video_path: str, loop_duration_seconds: float):
+    from media_reader import MediaAudioEvent
+
+    result = subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-i", str(video_path),
+            "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"FFmpeg audio preload failed: {error or result.returncode}")
+
+    interleaved = np.frombuffer(result.stdout, dtype="<f4")
+    usable_values = (interleaved.size // 2) * 2
+    if usable_values <= 0:
+        raise RuntimeError("FFmpeg audio preload produced no samples.")
+
+    planar = np.ascontiguousarray(
+        interleaved[:usable_values].reshape(-1, 2).T,
+        dtype=np.float32,
+    )
+    expected_samples = max(1, int(round(loop_duration_seconds * 48000.0)))
+    if planar.shape[1] > expected_samples:
+        planar = planar[:, :expected_samples]
+    elif planar.shape[1] < expected_samples:
+        padded = np.zeros((2, expected_samples), dtype=np.float32)
+        padded[:, :planar.shape[1]] = planar
+        planar = padded
+
+    events = []
+    for start in range(0, expected_samples, 1024):
+        end = min(expected_samples, start + 1024)
+        events.append(
+            MediaAudioEvent(
+                start / 48000.0,
+                np.ascontiguousarray(planar[:, start:end], dtype=np.float32),
+            )
+        )
+    return events
+
+
+def _wait_until_audio_deadline(
+    playback_start_monotonic: float,
+    first_media_time_seconds: float,
+    media_time_seconds: float,
+    stop_event: threading.Event,
+    stats: dict,
+) -> bool:
+    target_time = _media_deadline(playback_start_monotonic, first_media_time_seconds, media_time_seconds)
+
+    while True:
+        sleep_for = target_time - time.monotonic()
+        if sleep_for <= 0.0:
+            break
+        if stop_event.wait(min(sleep_for, 0.005)):
+            return False
+
+    late_seconds = time.monotonic() - target_time
+    if late_seconds > _AUDIO_LATE_WARN_SECONDS:
+        stats["late_count"] += 1
+        stats["late_ms_max"] = max(stats.get("late_ms_max", 0.0), late_seconds * 1000.0)
+        if stats["late_count"] % _AUDIO_THREAD_LATE_LOG_INTERVAL == 0:
+            print(
+                f"[warn] audio timing late {stats['late_count']} times "
+                f"(latest overrun: {late_seconds * 1000.0:.2f} ms)"
+            )
+
+    return True
+
+
+def _run_audio_sender(
+    video_path: str,
+    sender_plain,
+    sender_overlay,
+    worker_ready: threading.Event,
+    clock_ready: threading.Event,
+    stop_event: threading.Event,
+    clock_state: dict,
+    clock_lock: threading.Lock,
+    stats: dict,
+    diagnostics: StreamDiagnostics,
+    preload_audio: bool,
+    loop_duration_seconds: float,
+) -> None:
+    from media_reader import LoopingMediaReader, MediaAudioEvent
+
+    reader = None
+    last_audio_media_time = None
+    try:
+        cached_events = None
+        cached_event_index = 0
+        cached_loop_offset = 0.0
+        cached_loop_duration = loop_duration_seconds
+        if preload_audio:
+            preload_started = time.monotonic()
+            try:
+                cached_events = _preload_audio_events_ffmpeg(
+                    video_path,
+                    cached_loop_duration,
+                )
+                preload_ms = (time.monotonic() - preload_started) * 1000.0
+                diagnostics.emit(
+                    "audio_preloaded",
+                    events=len(cached_events),
+                    preload_ms=round(preload_ms, 3),
+                    duration=round(cached_loop_duration, 6),
+                    backend="ffmpeg",
+                )
+                print(
+                    f"[info] audio preloaded: {len(cached_events)} events in "
+                    f"{preload_ms:.1f} ms (FFmpeg)"
+                )
+            except Exception as exc:
+                cached_events = None
+                diagnostics.emit("audio_preload_fallback", error=str(exc))
+                print(f"[warn] audio preload failed; using streaming fallback: {exc}")
+
+        if cached_events is None:
+            reader = LoopingMediaReader(
+                video_path,
+                audio_sample_rate=48000,
+                audio_channels=2,
+                decode_video=False,
+                decode_audio=True,
+            )
+
+        worker_ready.set()
+
+        while not stop_event.is_set():
+            if clock_ready.wait(0.005):
+                break
+        if stop_event.is_set():
+            return
+
+        with clock_lock:
+            playback_start_monotonic = clock_state["playback_start_monotonic"]
+            first_media_time_seconds = clock_state["first_media_time_seconds"]
+
+        while not stop_event.is_set():
+            read_started = time.monotonic()
+            if cached_events is not None:
+                base_event = cached_events[cached_event_index]
+                event = MediaAudioEvent(
+                    cached_loop_offset + base_event.media_time_seconds,
+                    base_event.samples,
+                )
+                cached_event_index += 1
+                if cached_event_index >= len(cached_events):
+                    cached_event_index = 0
+                    cached_loop_offset += cached_loop_duration
+            else:
+                event = reader.read_next()
+            read_ms = (time.monotonic() - read_started) * 1000.0
+            stats["read_ms_max"] = max(stats.get("read_ms_max", 0.0), read_ms)
+            if read_ms > _DIAGNOSTIC_READ_WARN_SECONDS * 1000.0:
+                stats["read_slow_count"] = stats.get("read_slow_count", 0) + 1
+                diagnostics.emit(
+                    "audio_reader_slow",
+                    read_ms=round(read_ms, 3),
+                    media_time=round(getattr(event, "media_time_seconds", 0.0), 6),
+                )
+            if not isinstance(event, MediaAudioEvent):
+                continue
+
+            sample_count = int(event.samples.shape[1])
+            duration_seconds = sample_count / 48000.0
+            if last_audio_media_time is not None:
+                media_gap = event.media_time_seconds - last_audio_media_time
+                expected_gap = duration_seconds
+                if media_gap - expected_gap > _DIAGNOSTIC_AUDIO_GAP_SECONDS:
+                    stats["media_gap_count"] = stats.get("media_gap_count", 0) + 1
+                    stats["media_gap_ms_max"] = max(
+                        stats.get("media_gap_ms_max", 0.0),
+                        (media_gap - expected_gap) * 1000.0,
+                    )
+                    diagnostics.emit(
+                        "audio_media_gap",
+                        media_gap_ms=round(media_gap * 1000.0, 3),
+                        expected_ms=round(expected_gap * 1000.0, 3),
+                        media_time=round(event.media_time_seconds, 6),
+                        samples=sample_count,
+                    )
+            last_audio_media_time = event.media_time_seconds
+            stats["samples"] = stats.get("samples", 0) + sample_count
+            stats["chunk_samples_max"] = max(stats.get("chunk_samples_max", 0), sample_count)
+
+            if not _wait_until_audio_deadline(
+                playback_start_monotonic,
+                first_media_time_seconds,
+                event.media_time_seconds,
+                stop_event,
+                stats,
+            ):
+                break
+
+            send_started = time.monotonic()
+            _send_audio_event(sender_plain, sender_overlay, event)
+            send_ms = (time.monotonic() - send_started) * 1000.0
+            stats["send_ms_max"] = max(stats.get("send_ms_max", 0.0), send_ms)
+            if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
+                stats["send_slow_count"] = stats.get("send_slow_count", 0) + 1
+                diagnostics.emit(
+                    "audio_send_slow",
+                    send_ms=round(send_ms, 3),
+                    media_time=round(event.media_time_seconds, 6),
+                    samples=sample_count,
+                )
+            stats["events"] += 1
+
+    except Exception as exc:
+        stats["error"] = exc
+        worker_ready.set()
+        stop_event.set()
+    finally:
+        if reader is not None:
+            reader.close()
 
 
 def stream_video(
@@ -498,9 +885,39 @@ def stream_video(
     rx_metadata: bool = True,
     rx_metadata_verbose: bool = False,
     rx_metadata_log_all: bool = False,
+    video_pixel_format: str = "bgra",
+    diagnostics_enabled: bool = False,
+    diagnostics_file: str | None = None,
+    video_prefetch_frames: int = 0,
+    preload_audio: bool = False,
 ):
-    media_reader = LoopingMediaReader(video_path, audio_sample_rate=48000, audio_channels=2)
+    # Initialize NDI before PyAV loads FFmpeg dylibs. This avoids the macOS
+    # AVFoundation class collision becoming part of sender creation.
+    get_ndi_runtime()
+    from media_reader import LoopingMediaReader, MediaAudioEvent, MediaVideoEvent
+
+    diagnostics = StreamDiagnostics(diagnostics_enabled, diagnostics_file)
+    media_reader = LoopingMediaReader(
+        video_path,
+        audio_sample_rate=48000,
+        audio_channels=2,
+        decode_video=True,
+        decode_audio=False,
+        video_pixel_format=video_pixel_format,
+    )
     media_info = media_reader.info
+
+    preload_audio_requested = bool(preload_audio)
+    preload_audio = bool(
+        preload_audio_requested
+        and media_info.duration_seconds <= _AUDIO_PRELOAD_MAX_DURATION_SECONDS
+    )
+    if preload_audio_requested and not preload_audio:
+        print(
+            "[info] audio preload disabled for long source "
+            f"({media_info.duration_seconds:.1f}s > "
+            f"{_AUDIO_PRELOAD_MAX_DURATION_SECONDS:.0f}s)"
+        )
 
     width = media_info.width
     height = media_info.height
@@ -511,8 +928,33 @@ def stream_video(
     print(f"Source  : {video_path}")
     print(f"Size    : {width}x{height} @ {fps_float:.3f} fps ({total_frames} frames)")
 
-    sender_plain, _ = make_sender(source_name, width, height, fps)
+    if dual and media_info.video_pixel_format != "bgra":
+        raise ValueError("The --dual overlay output requires BGRA video.")
+
+    sender_plain, _ = make_sender(
+        source_name,
+        width,
+        height,
+        fps,
+        video_pixel_format=media_info.video_pixel_format,
+    )
     print(f"NDI name: '{source_name}'")
+    print(f"Pixels  : {media_info.video_pixel_format.upper()}")
+    diagnostics.emit(
+        "stream_start",
+        video_path=str(video_path),
+        source_name=str(source_name),
+        width=width,
+        height=height,
+        fps_num=int(fps.numerator),
+        fps_den=int(fps.denominator),
+        fps=round(fps_float, 6),
+        total_frames=total_frames,
+        pixel_format=media_info.video_pixel_format,
+        video_prefetch_frames=max(0, int(video_prefetch_frames)),
+        preload_audio=bool(preload_audio),
+        preload_audio_requested=preload_audio_requested,
+    )
 
     audio_enabled = media_info.audio_enabled
     if audio_enabled:
@@ -538,7 +980,13 @@ def stream_video(
     sender_overlay = None
     if dual:
         overlay_name = f"{source_name}-Square"
-        sender_overlay, _ = make_sender(overlay_name, width, height, fps)
+        sender_overlay, _ = make_sender(
+            overlay_name,
+            width,
+            height,
+            fps,
+            video_pixel_format=media_info.video_pixel_format,
+        )
         print(f"NDI name: '{overlay_name}'")
         if audio_enabled:
             _configure_audio_frame(
@@ -554,15 +1002,84 @@ def stream_video(
     playback_start_monotonic = None
     first_media_time_seconds = None
     late_count = 0
+    video_drop_count = 0
+    video_sent_count = 0
+    video_decode_read_ms_max = 0.0
+    video_decode_slow_count = 0
+    video_prefetch_wait_ms_max = 0.0
+    video_send_ms_max = 0.0
+    video_send_slow_count = 0
+    video_gap_ms_max = 0.0
+    video_gap_count = 0
+    last_video_send_monotonic = None
+    expected_video_interval = 1.0 / max(fps_float, 1.0)
+    audio_thread = None
+    audio_stop_event = None
+    audio_worker_ready = None
+    audio_clock_ready = None
+    audio_clock_lock = threading.Lock()
+    audio_clock_state = {
+        "playback_start_monotonic": None,
+        "first_media_time_seconds": None,
+    }
+    audio_stats = {
+        "events": 0,
+        "late_count": 0,
+        "late_ms_max": 0.0,
+        "samples": 0,
+        "chunk_samples_max": 0,
+        "media_gap_count": 0,
+        "media_gap_ms_max": 0.0,
+        "send_ms_max": 0.0,
+        "send_slow_count": 0,
+        "read_ms_max": 0.0,
+        "read_slow_count": 0,
+        "error": None,
+    }
 
     backchannel = None
     dispatcher = None
     viewport_handler = None
+    uyvy_overlay_warning_emitted = False
     viewport_stale_timeout_seconds = 3.0
+    video_prefetcher = None
 
     with sender_plain:
         if sender_overlay is not None:
             sender_overlay.__enter__()
+
+        if audio_enabled:
+            audio_stop_event = threading.Event()
+            audio_worker_ready = threading.Event()
+            audio_clock_ready = threading.Event()
+            audio_thread = threading.Thread(
+                target=_run_audio_sender,
+                args=(
+                    video_path,
+                    sender_plain,
+                    sender_overlay,
+                    audio_worker_ready,
+                    audio_clock_ready,
+                    audio_stop_event,
+                    audio_clock_state,
+                    audio_clock_lock,
+                    audio_stats,
+                    diagnostics,
+                    preload_audio,
+                    media_info.duration_seconds,
+                ),
+                name="NDI Audio Sender",
+                daemon=True,
+            )
+            audio_thread.start()
+            audio_ready_timeout = 30.0 if preload_audio else 5.0
+            if not audio_worker_ready.wait(timeout=audio_ready_timeout):
+                raise RuntimeError(
+                    f"Audio sender thread did not become ready within {audio_ready_timeout:.0f} seconds."
+                )
+            if audio_stats["error"] is not None:
+                raise RuntimeError(f"Audio sender thread failed during startup: {audio_stats['error']}")
+            print("[info] audio sender thread ready")
 
         if rx_metadata:
             try:
@@ -589,6 +1106,11 @@ def stream_video(
                 viewport_handler = None
                 print(f"[warn] could not start backchannel receiver: {exc}")
 
+        if video_prefetch_frames > 0:
+            video_prefetcher = _VideoPrefetcher(media_reader, video_prefetch_frames)
+            video_prefetcher.start()
+            print(f"[info] video prefetch enabled: {video_prefetcher.capacity} frames")
+
         try:
             while True:
                 if backchannel is not None and dispatcher is not None:
@@ -596,7 +1118,24 @@ def stream_video(
                     if messages:
                         dispatcher.dispatch_many(messages)
 
-                event = media_reader.read_next()
+                read_started = time.monotonic()
+                if video_prefetcher is not None:
+                    event, read_ms, prefetch_wait_ms = video_prefetcher.read_next()
+                    video_prefetch_wait_ms_max = max(
+                        video_prefetch_wait_ms_max,
+                        prefetch_wait_ms,
+                    )
+                else:
+                    event = media_reader.read_next()
+                    read_ms = (time.monotonic() - read_started) * 1000.0
+                video_decode_read_ms_max = max(video_decode_read_ms_max, read_ms)
+                if read_ms > _DIAGNOSTIC_READ_WARN_SECONDS * 1000.0:
+                    video_decode_slow_count += 1
+                    diagnostics.emit(
+                        "video_reader_slow",
+                        read_ms=round(read_ms, 3),
+                        media_time=round(getattr(event, "media_time_seconds", 0.0), 6),
+                    )
                 if event is None:
                     print("Error: failed to decode media event.")
                     break
@@ -604,6 +1143,11 @@ def stream_video(
                 if playback_start_monotonic is None or first_media_time_seconds is None:
                     playback_start_monotonic = time.monotonic()
                     first_media_time_seconds = event.media_time_seconds
+                    if audio_clock_ready is not None:
+                        with audio_clock_lock:
+                            audio_clock_state["playback_start_monotonic"] = playback_start_monotonic
+                            audio_clock_state["first_media_time_seconds"] = first_media_time_seconds
+                        audio_clock_ready.set()
 
                 playback_start_monotonic, late_count = _wait_until_media_deadline(
                     playback_start_monotonic,
@@ -613,34 +1157,138 @@ def stream_video(
                 )
 
                 if isinstance(event, MediaVideoEvent):
-                    bgra = np.array(event.frame_bgra, copy=True)
-                    if viewport_handler is not None and viewport_handler.state.latest is not None:
+                    video_late_seconds = _deadline_lateness_seconds(
+                        playback_start_monotonic,
+                        first_media_time_seconds,
+                        event.media_time_seconds,
+                    )
+                    if video_late_seconds > _VIDEO_AUDIO_FIRST_DROP_SECONDS:
+                        video_drop_count += 1
+                        if video_drop_count % _VIDEO_DROP_LOG_INTERVAL == 0:
+                            print(
+                                f"[warn] dropping late video frames to protect audio "
+                                f"(drops={video_drop_count}, latest={video_late_seconds * 1000.0:.2f} ms)"
+                            )
+                            diagnostics.emit(
+                                "video_drop",
+                                drops=video_drop_count,
+                                late_ms=round(video_late_seconds * 1000.0, 3),
+                                media_time=round(event.media_time_seconds, 6),
+                            )
+                        continue
+
+                    frame_data = event.frame_data
+                    if (
+                        media_info.video_pixel_format == "bgra"
+                        and viewport_handler is not None
+                        and viewport_handler.state.latest is not None
+                    ):
                         age = time.monotonic() - viewport_handler.state.last_update_monotonic
                         if age <= viewport_stale_timeout_seconds:
-                            _draw_viewport_roi(bgra, viewport_handler.state.latest)
+                            frame_data = np.array(event.frame_data, copy=True)
+                            _draw_viewport_roi(frame_data, viewport_handler.state.latest)
+                    elif (
+                        media_info.video_pixel_format == "uyvy422"
+                        and viewport_handler is not None
+                        and viewport_handler.state.latest is not None
+                        and not uyvy_overlay_warning_emitted
+                    ):
+                        print("[info] viewport drawing is disabled for UYVY performance mode")
+                        uyvy_overlay_warning_emitted = True
 
-                    plain_frame = bgra.ravel()
+                    plain_frame = frame_data.ravel()
+                    send_started = time.monotonic()
                     sender_plain.write_video(plain_frame)
+                    send_ms = (time.monotonic() - send_started) * 1000.0
+                    video_send_ms_max = max(video_send_ms_max, send_ms)
+                    if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
+                        video_send_slow_count += 1
+                        diagnostics.emit(
+                            "video_send_slow",
+                            send_ms=round(send_ms, 3),
+                            media_time=round(event.media_time_seconds, 6),
+                            frame=video_frame_idx,
+                        )
 
                     if sender_overlay is not None:
-                        bgra_sq = np.array(bgra, copy=True)
+                        bgra_sq = np.array(frame_data, copy=True)
                         draw_square(bgra_sq, video_frame_idx)
                         overlay_frame = bgra_sq.ravel()
                         sender_overlay.write_video(overlay_frame)
 
+                    now = time.monotonic()
+                    if last_video_send_monotonic is not None:
+                        video_gap_seconds = now - last_video_send_monotonic
+                        video_gap_ms_max = max(video_gap_ms_max, video_gap_seconds * 1000.0)
+                        if video_gap_seconds > expected_video_interval * _DIAGNOSTIC_VIDEO_GAP_FACTOR:
+                            video_gap_count += 1
+                            diagnostics.emit(
+                                "video_output_gap",
+                                gap_ms=round(video_gap_seconds * 1000.0, 3),
+                                expected_ms=round(expected_video_interval * 1000.0, 3),
+                                media_time=round(event.media_time_seconds, 6),
+                                frame=video_frame_idx,
+                            )
+                    last_video_send_monotonic = now
+                    video_sent_count += 1
                     video_frame_idx += 1
+                    diagnostics.maybe_summary(
+                        media_time=event.media_time_seconds,
+                        video_sent=video_sent_count,
+                        video_drops=video_drop_count,
+                        video_late=late_count,
+                        video_gap_count=video_gap_count,
+                        video_gap_ms_max=video_gap_ms_max,
+                        video_read_ms_max=video_decode_read_ms_max,
+                        video_read_slow=video_decode_slow_count,
+                        video_prefetch_depth=(video_prefetcher.depth if video_prefetcher else 0),
+                        video_prefetch_wait_ms_max=video_prefetch_wait_ms_max,
+                        video_send_ms_max=video_send_ms_max,
+                        video_send_slow=video_send_slow_count,
+                        video_decode_errors=getattr(media_reader, "video_decode_errors", 0),
+                        video_decode_recoveries=getattr(media_reader, "video_decode_recoveries", 0),
+                        audio_events=audio_stats["events"],
+                        audio_late=audio_stats["late_count"],
+                        audio_late_ms_max=audio_stats["late_ms_max"],
+                        audio_samples=audio_stats["samples"],
+                        audio_chunk_samples_max=audio_stats["chunk_samples_max"],
+                        audio_gap_count=audio_stats["media_gap_count"],
+                        audio_gap_ms_max=audio_stats["media_gap_ms_max"],
+                        audio_send_ms_max=audio_stats["send_ms_max"],
+                        audio_send_slow=audio_stats["send_slow_count"],
+                        audio_read_ms_max=audio_stats["read_ms_max"],
+                        audio_read_slow=audio_stats["read_slow_count"],
+                    )
                     continue
 
                 if isinstance(event, MediaAudioEvent):
-                    sender_plain.write_audio(event.samples)
-                    if sender_overlay is not None:
-                        sender_overlay.write_audio(event.samples)
+                    _send_audio_event(sender_plain, sender_overlay, event)
                     continue
 
         except KeyboardInterrupt:
             print("\nStopped by user.")
 
         finally:
+            if video_prefetcher is not None:
+                video_prefetcher.close()
+
+            if audio_enabled:
+                if audio_stop_event is not None:
+                    audio_stop_event.set()
+                if audio_thread is not None:
+                    audio_thread.join(timeout=2.0)
+                print(
+                    "[info] audio thread stats: "
+                    f"events={audio_stats['events']}, "
+                    f"late={audio_stats['late_count']}, "
+                    f"late_ms_max={audio_stats['late_ms_max']:.2f}, "
+                    f"send_ms_max={audio_stats['send_ms_max']:.2f}, "
+                    f"gaps={audio_stats['media_gap_count']}"
+                )
+                print(f"[info] video drops to protect audio: {video_drop_count}")
+                if audio_stats["error"] is not None:
+                    print(f"[warn] audio thread error: {audio_stats['error']}")
+
             if backchannel is not None:
                 backchannel.stop()
                 stats = backchannel.stats_snapshot()
@@ -659,6 +1307,17 @@ def stream_video(
             media_reader.close()
             if sender_overlay is not None:
                 sender_overlay.__exit__(None, None, None)
+            diagnostics.emit(
+                "stream_stop",
+                video_sent=video_sent_count,
+                video_drops=video_drop_count,
+                video_gap_count=video_gap_count,
+                video_gap_ms_max=round(video_gap_ms_max, 3),
+                audio_events=audio_stats["events"],
+                audio_late=audio_stats["late_count"],
+                audio_gap_count=audio_stats["media_gap_count"],
+            )
+            diagnostics.close()
 
 
 if __name__ == "__main__":
@@ -667,18 +1326,63 @@ if __name__ == "__main__":
     rx_metadata_verbose = "--rx-metadata-verbose" in args
     rx_metadata_log_all = "--rx-metadata-log-all" in args
     rx_metadata = "--no-rx-metadata" not in args
+    video_pixel_format = "uyvy422" if "--uyvy" in args else "bgra"
+    diagnostics_enabled = "--diagnostics" in args
+    diagnostics_file = None
+    video_prefetch_frames = 0
+    preload_audio = "--preload-audio" in args
+    source_name = "StreamNDI"
+
+    if "--video-prefetch-frames" in args:
+        prefetch_index = args.index("--video-prefetch-frames")
+        try:
+            video_prefetch_frames = max(0, int(args[prefetch_index + 1]))
+        except (IndexError, ValueError) as exc:
+            raise SystemExit("--video-prefetch-frames requires a non-negative integer") from exc
+        del args[prefetch_index:prefetch_index + 2]
+
+    if "--diagnostics-file" in args:
+        diagnostics_file_index = args.index("--diagnostics-file")
+        try:
+            diagnostics_file = args[diagnostics_file_index + 1]
+        except IndexError as exc:
+            raise SystemExit("--diagnostics-file requires a path") from exc
+        del args[diagnostics_file_index:diagnostics_file_index + 2]
+        diagnostics_enabled = True
+
+    if "--source-name" in args:
+        source_name_index = args.index("--source-name")
+        try:
+            source_name = args[source_name_index + 1]
+        except IndexError as exc:
+            raise SystemExit("--source-name requires a name") from exc
+        del args[source_name_index:source_name_index + 2]
 
     args = [
         a
         for a in args
-        if a not in ("--dual", "--rx-metadata-verbose", "--rx-metadata-log-all", "--no-rx-metadata")
+        if a not in (
+            "--dual",
+            "--rx-metadata-verbose",
+            "--rx-metadata-log-all",
+            "--no-rx-metadata",
+            "--uyvy",
+            "--diagnostics",
+            "--preload-audio",
+        )
     ]
 
     video = args[0] if args else "Videos/big_buck_bunny.mp4"
     stream_video(
         video,
+        source_name=source_name,
         dual=dual,
         rx_metadata=rx_metadata,
         rx_metadata_verbose=rx_metadata_verbose,
         rx_metadata_log_all=rx_metadata_log_all,
+        video_pixel_format=video_pixel_format,
+        diagnostics_enabled=diagnostics_enabled,
+        diagnostics_file=diagnostics_file,
+        video_prefetch_frames=video_prefetch_frames,
+        preload_audio=preload_audio,
     )

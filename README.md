@@ -50,6 +50,10 @@ Important design choices:
 - Audio and video are decoded from the same container timeline.
 - Audio is no longer reconstructed by slicing a full decoded buffer per video frame.
 - NDI sender clocks are disabled in the runtime path so that timing has one authority instead of two competing ones.
+- Audio is decoded and sent on a dedicated thread so heavy video decode/overlay work cannot starve the receiver audio queue.
+- Late video frames are dropped before NDI send when needed to protect continuous audio.
+- The 8K launcher sends packed UYVY 4:2:2 instead of BGRA, halving frame memory and avoiding NDI's BGRA color conversion.
+- Viewport and square drawing are disabled in UYVY performance mode; metadata reception remains enabled.
 - The sender path is direct `libndi`, not `cyndilib`.
 
 ## Key Files
@@ -112,7 +116,59 @@ python3 stream_video.py Videos/big_buck_bunny.mp4
 python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
 python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
 python3 stream_video.py Videos/big_buck_bunny.mp4 --no-rx-metadata
+python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics
+python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics --source-name StreamNDI-Test
 ```
+
+Convenience launchers also accept diagnostics through environment variables:
+
+```bash
+NDI_DIAGNOSTICS=1 Launchers/Stream_NDI_Default.command
+NDI_DIAGNOSTICS=1 NDI_SOURCE_NAME=StreamNDI-8K-Test Launchers/Stream_NDI_Default_8K.command
+```
+
+Diagnostics are written to `Logs/ndi_diagnostics_*.jsonl` and mirrored as compact `[diag]`
+console summaries once per second.
+
+## Runtime Diagnostics
+
+Use diagnostics when audio clicks, pitch wobble, receiver dropouts, or video stalls appear.
+
+Correlate these fields first:
+
+- `audio_late`, `audio_late_ms_max`: audio sender missed its playback deadline.
+- `audio_gap_count`, `audio_gap_ms_max`: decoded audio timeline has a gap.
+- `audio_send_ms_max`: NDI audio send call is taking too long.
+- `video_drops`: late video frames intentionally dropped to keep audio continuous.
+- `video_gap_count`, `video_gap_ms_max`: visible output stalls between sent video frames.
+- `video_read_ms_max`, `video_read_slow`: PyAV/decode/conversion was slow.
+- `video_send_ms_max`, `video_send_slow`: NDI video send call was slow or blocked.
+- `video_decode_errors`, `video_decode_recoveries`: source decoder hit invalid data and reopened.
+
+For Apple Vision Pro/Xcode log correlation, run this in a separate Terminal before reproducing
+the issue:
+
+```bash
+Launchers/Capture_AVP_Logs.command
+```
+
+Optional filters:
+
+```bash
+AVP_LOG_PROCESS=ACCESSVisionOS Launchers/Capture_AVP_Logs.command
+AVP_LOG_TIMEOUT=45m Launchers/Capture_AVP_Logs.command
+```
+
+Current device/app observed during debugging:
+
+- Apple Vision Pro: `Javier's Apple Vision Pro`
+- CoreDevice identifier: `8C7D41D6-A14D-50DB-9EDF-865B71CD0CCA`
+- Unity app: `ACCESS_VisionOS`
+- Bundle id: `com.DefaultCompany.ACCESS-VisionOS`
+
+The AVP/Xcode capture writes `Logs/avp_xcode_*.ndjson`. Compare its timestamps with
+`Logs/ndi_diagnostics_*.jsonl` around the moment where NDI Monitor, Unity Editor, or AVP
+shows a stall or audio artifact.
 
 ## Validation Workflow
 
@@ -143,6 +199,9 @@ Recommended ongoing QA:
 | No NDI source visible | `libndi` runtime or LAN visibility | Verify runtime installation and same network segment |
 | Stream fails immediately | Missing `PyAV` dependency | Reinstall `requirements.txt` |
 | Audio drift after long session | Source generation or scheduling | Compare in NDI Monitor and Unity; inspect sender logs |
+| Audio clicks or intermittent choppiness | Sender audio starvation under video/decode load | Keep the dedicated audio sender thread and audio-first video dropping enabled |
+| 8K audio/video stalls in BGRA mode | 8K BGRA conversion and NDI compression overload | Use `Launchers/Stream_NDI_Default_8K.command`, which selects AV1 plus UYVY performance mode |
+| AVFoundation duplicate-class warning on startup | NDI HX Driver and PyAV both load FFmpeg AVFoundation classes | Remove/disable the conflicting NDI HX FFmpeg driver for production validation |
 | Video stutter under load | Decode or host pressure | Reduce source complexity and monitor timing warnings |
 | Metadata overlay missing | Unity backchannel or stale metadata | Check sender console and Unity metadata sender |
 

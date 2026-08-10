@@ -40,7 +40,13 @@ def draw_square(frame: np.ndarray, frame_idx: int) -> np.ndarray:
     return frame
 
 
-def make_sender(source_name: str, width: int, height: int, fps: Fraction) -> tuple:
+def make_sender(
+    source_name: str,
+    width: int,
+    height: int,
+    fps: Fraction,
+    video_pixel_format: str = "bgra",
+) -> tuple:
     """Create and configure a minimal native libndi sender for one NDI output."""
     sender = NativeNdiSender(
         source_name,
@@ -49,5 +55,6 @@ def make_sender(source_name: str, width: int, height: int, fps: Fraction) -> tup
         fps,
         clock_video=False,
         clock_audio=False,
+        video_pixel_format=video_pixel_format,
     )
     return sender, None

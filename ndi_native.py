@@ -4,6 +4,7 @@ import atexit
 import ctypes
 import ctypes.util
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +12,7 @@ import numpy as np
 
 
 NDI_VIDEO_FOURCC_BGRA = 1095911234
+NDI_VIDEO_FOURCC_UYVY = 1498831189
 NDI_AUDIO_FOURCC_FLTP = 1884572742
 NDI_FRAME_FORMAT_PROGRESSIVE = 1
 NDI_SEND_TIMECODE_SYNTHESIZE = 9223372036854775807
@@ -133,6 +135,12 @@ class _NdiRuntime:
         ]
         self.lib.NDIlib_send_send_video_v2.restype = None
 
+        self.lib.NDIlib_send_send_video_async_v2.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(NDIlib_video_frame_v2_t),
+        ]
+        self.lib.NDIlib_send_send_video_async_v2.restype = None
+
         self.lib.NDIlib_send_send_audio_v3.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(NDIlib_audio_frame_v3_t),
@@ -156,6 +164,15 @@ class _NdiRuntime:
         lib = getattr(self, "lib", None)
         if lib is not None:
             lib.NDIlib_destroy()
+
+    def version_string(self) -> str:
+        try:
+            raw = self.lib.NDIlib_version()
+            if raw:
+                return raw.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        return "unknown"
 
 
 _runtime_lock = threading.Lock()
@@ -182,6 +199,7 @@ class NativeNdiSender:
         ndi_groups: str = "",
         clock_video: bool = True,
         clock_audio: bool = False,
+        video_pixel_format: str = "bgra",
     ) -> None:
         self._runtime = get_ndi_runtime()
         self._ndi_name = str(ndi_name)
@@ -197,18 +215,33 @@ class NativeNdiSender:
         )
         self._sender_ptr = ctypes.c_void_p()
         self._running = False
+        self._video_send_lock = threading.Lock()
+        self._audio_send_lock = threading.Lock()
+        self._video_async_buffer = None
+
+        pixel_format = str(video_pixel_format).lower()
+        if pixel_format == "bgra":
+            video_fourcc = NDI_VIDEO_FOURCC_BGRA
+            video_bytes_per_pixel = 4
+        elif pixel_format == "uyvy422":
+            video_fourcc = NDI_VIDEO_FOURCC_UYVY
+            video_bytes_per_pixel = 2
+        else:
+            raise ValueError(f"Unsupported NDI video pixel format: '{video_pixel_format}'.")
+        self._video_pixel_format = pixel_format
+        self._video_bytes_per_pixel = video_bytes_per_pixel
 
         self._video_frame = NDIlib_video_frame_v2_t(
             xres=int(width),
             yres=int(height),
-            FourCC=NDI_VIDEO_FOURCC_BGRA,
+            FourCC=video_fourcc,
             frame_rate_N=int(fps.numerator),
             frame_rate_D=int(fps.denominator),
             picture_aspect_ratio=0.0,
             frame_format_type=NDI_FRAME_FORMAT_PROGRESSIVE,
             timecode=NDI_SEND_TIMECODE_SYNTHESIZE,
             p_data=None,
-            line_stride_in_bytes=int(width) * 4,
+            line_stride_in_bytes=int(width) * video_bytes_per_pixel,
             p_metadata=None,
             timestamp=0,
         )
@@ -239,9 +272,25 @@ class NativeNdiSender:
     def open(self) -> None:
         if self._running:
             return
-        ptr = self._runtime.lib.NDIlib_send_create(ctypes.byref(self._create))
+
+        ptr = None
+        for attempt in range(3):
+            ptr = self._runtime.lib.NDIlib_send_create(ctypes.byref(self._create))
+            if ptr:
+                break
+            if attempt < 2:
+                time.sleep(0.15)
+
         if not ptr:
-            raise RuntimeError("NDIlib_send_create failed.")
+            fps = f"{self._video_frame.frame_rate_N}/{self._video_frame.frame_rate_D}"
+            raise RuntimeError(
+                "NDIlib_send_create failed "
+                f"(name='{self._ndi_name}', "
+                f"video={self._video_frame.xres}x{self._video_frame.yres}@{fps}, "
+                f"runtime='{self._runtime.version_string()}'). "
+                "Close stale NDI senders/monitors and retry; if this persists, restart the NDI "
+                "runtime or remove the conflicting NDI HX FFmpeg driver from this Python process."
+            )
         self._sender_ptr = ctypes.c_void_p(ptr)
         self._running = True
 
@@ -252,7 +301,13 @@ class NativeNdiSender:
         self._sender_ptr = ctypes.c_void_p()
         self._running = False
         if ptr:
-            self._runtime.lib.NDIlib_send_destroy(ptr)
+            with self._video_send_lock, self._audio_send_lock:
+                try:
+                    self._runtime.lib.NDIlib_send_send_video_async_v2(ptr, None)
+                except Exception:
+                    pass
+                self._runtime.lib.NDIlib_send_destroy(ptr)
+                self._video_async_buffer = None
 
     def __enter__(self):
         self.open()
@@ -266,11 +321,27 @@ class NativeNdiSender:
             raise RuntimeError("Sender must be opened before writing video.")
 
         frame_data = np.ascontiguousarray(data, dtype=np.uint8)
-        self._video_frame.p_data = frame_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-        self._runtime.lib.NDIlib_send_send_video_v2(
-            self._sender_ptr,
-            ctypes.byref(self._video_frame),
+        expected_size = (
+            self._video_frame.xres
+            * self._video_frame.yres
+            * self._video_bytes_per_pixel
         )
+        if frame_data.size != expected_size:
+            raise ValueError(
+                f"{self._video_pixel_format} video frame has an unexpected size: "
+                f"got {frame_data.size} bytes, expected {expected_size} "
+                f"for {self._video_frame.xres}x{self._video_frame.yres}."
+            )
+
+        with self._video_send_lock:
+            # NDI owns the previous async buffer until the next async call
+            # returns. Keep that reference alive while handing it this frame.
+            self._video_frame.p_data = frame_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+            self._runtime.lib.NDIlib_send_send_video_async_v2(
+                self._sender_ptr,
+                ctypes.byref(self._video_frame),
+            )
+            self._video_async_buffer = frame_data
 
     def write_audio(self, data) -> None:
         if not self._running:
@@ -282,11 +353,12 @@ class NativeNdiSender:
         if audio_data.ndim != 2:
             raise ValueError("Audio data must have shape (channels, samples).")
 
-        self._audio_frame.no_channels = int(audio_data.shape[0])
-        self._audio_frame.no_samples = int(audio_data.shape[1])
-        self._audio_frame.channel_stride_in_bytes = int(audio_data.shape[1]) * 4
-        self._audio_frame.p_data = audio_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-        self._runtime.lib.NDIlib_send_send_audio_v3(
-            self._sender_ptr,
-            ctypes.byref(self._audio_frame),
-        )
+        with self._audio_send_lock:
+            self._audio_frame.no_channels = int(audio_data.shape[0])
+            self._audio_frame.no_samples = int(audio_data.shape[1])
+            self._audio_frame.channel_stride_in_bytes = int(audio_data.shape[1]) * 4
+            self._audio_frame.p_data = audio_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
+            self._runtime.lib.NDIlib_send_send_audio_v3(
+                self._sender_ptr,
+                ctypes.byref(self._audio_frame),
+            )

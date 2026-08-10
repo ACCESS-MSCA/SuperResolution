@@ -21,6 +21,10 @@ else:
 DEFAULT_FPS = Fraction(30, 1)
 _AV_TIME_BASE = 1_000_000.0
 _AUDIO_LAYOUT_BY_CHANNELS = {1: "mono", 2: "stereo"}
+_DECODE_ERROR_LOG_FIRST = 5
+_DECODE_ERROR_LOG_INTERVAL = 30
+_MAX_CONSECUTIVE_DECODE_ERRORS = 120
+_VIDEO_DECODE_RECOVERY_SKIP_SECONDS = 0.5
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,7 @@ class MediaInfo:
     audio_sample_rate: int
     audio_channels: int
     audio_max_samples_per_chunk: int
+    video_pixel_format: str
 
 
 @dataclass(frozen=True)
@@ -43,7 +48,7 @@ class MediaEvent:
 
 @dataclass(frozen=True)
 class MediaVideoEvent(MediaEvent):
-    frame_bgra: np.ndarray
+    frame_data: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -124,8 +129,27 @@ def _audio_frame_to_planar_float32(frame, channels: int) -> np.ndarray:
     raise ValueError(f"Could not normalize audio frame shape {data.shape} for {channels} channels")
 
 
+def _is_pyav_decode_error(exc: Exception) -> bool:
+    if av is None:
+        return False
+    ffmpeg_error = getattr(av, "FFmpegError", None)
+    if ffmpeg_error is not None and isinstance(exc, ffmpeg_error):
+        return True
+    error_module = getattr(av, "error", None)
+    invalid_data_error = getattr(error_module, "InvalidDataError", None) if error_module else None
+    return invalid_data_error is not None and isinstance(exc, invalid_data_error)
+
+
 class LoopingMediaReader:
-    def __init__(self, video_path: str, audio_sample_rate: int = 48000, audio_channels: int = 2) -> None:
+    def __init__(
+        self,
+        video_path: str,
+        audio_sample_rate: int = 48000,
+        audio_channels: int = 2,
+        decode_video: bool = True,
+        decode_audio: bool = True,
+        video_pixel_format: str = "bgra",
+    ) -> None:
         _require_pyav()
         if audio_channels not in _AUDIO_LAYOUT_BY_CHANNELS:
             raise ValueError("Only mono and stereo outputs are currently supported")
@@ -133,6 +157,13 @@ class LoopingMediaReader:
         self._video_path = str(video_path)
         self._audio_sample_rate = int(audio_sample_rate)
         self._audio_channels = int(audio_channels)
+        self._decode_video = bool(decode_video)
+        self._decode_audio = bool(decode_audio)
+        self._video_pixel_format = str(video_pixel_format).lower()
+        if self._video_pixel_format not in ("bgra", "uyvy422"):
+            raise ValueError(
+                f"Unsupported decoded video pixel format: '{video_pixel_format}'."
+            )
 
         self._video_container = None
         self._audio_container = None
@@ -155,6 +186,11 @@ class LoopingMediaReader:
 
         self.restart_count = 0
         self.early_restart_count = 0
+        self.video_decode_errors = 0
+        self.audio_decode_errors = 0
+        self.video_decode_recoveries = 0
+        self._consecutive_video_decode_errors = 0
+        self._consecutive_audio_decode_errors = 0
 
         self.info = self._open_pass(first_pass=True)
 
@@ -213,15 +249,15 @@ class LoopingMediaReader:
         )
         total_frames = int(getattr(video_stream, "frames", 0) or 0)
 
-        duration_candidates = [
-            _container_duration_seconds(probe_container),
-            _stream_duration_seconds(video_stream),
-        ]
-        if audio_stream is not None:
-            duration_candidates.append(_stream_duration_seconds(audio_stream))
+        # The video cadence is the loop clock. Container/audio durations often
+        # include AAC encoder padding; using the longest stream here inserts a
+        # real hole at every loop boundary (44 ms in the ACCESS 4K test clip).
+        duration_candidates = [_stream_duration_seconds(video_stream)]
         if total_frames > 0 and float(fps) > 0.0:
             duration_candidates.append(total_frames / float(fps))
-        duration_seconds = max(duration_candidates) if duration_candidates else 0.0
+        duration_seconds = max((value for value in duration_candidates if value > 0.0), default=0.0)
+        if duration_seconds <= 0.0:
+            duration_seconds = _container_duration_seconds(probe_container)
         if duration_seconds <= 0.0:
             duration_seconds = max(1.0 / float(fps), 0.001)
 
@@ -231,15 +267,20 @@ class LoopingMediaReader:
 
         probe_container.close()
 
-        self._video_container = av.open(self._video_path)
-        self._video_stream = next(stream for stream in self._video_container.streams if stream.type == "video")
-        try:
-            self._video_stream.thread_type = "AUTO"
-        except Exception:
-            pass
-        self._video_frames = iter(self._video_container.decode(video=0))
+        if self._decode_video:
+            self._video_container = av.open(self._video_path)
+            self._video_stream = next(stream for stream in self._video_container.streams if stream.type == "video")
+            try:
+                self._video_stream.thread_type = "AUTO"
+            except Exception:
+                pass
+            self._video_frames = iter(self._video_container.decode(video=0))
+        else:
+            self._video_container = None
+            self._video_stream = None
+            self._video_frames = None
 
-        if audio_enabled:
+        if audio_enabled and self._decode_audio:
             self._audio_container = av.open(self._video_path)
             self._audio_stream = next(stream for stream in self._audio_container.streams if stream.type == "audio")
             try:
@@ -266,6 +307,8 @@ class LoopingMediaReader:
         self._next_video_time_seconds = 0.0
         self._pass_max_end_seconds = 0.0
         self._pass_event_count = 0
+        self._consecutive_video_decode_errors = 0
+        self._consecutive_audio_decode_errors = 0
         self.restart_count += 1
 
         if not first_pass:
@@ -281,6 +324,7 @@ class LoopingMediaReader:
             audio_sample_rate=self._audio_sample_rate if audio_enabled else 0,
             audio_channels=self._audio_channels if audio_enabled else 0,
             audio_max_samples_per_chunk=audio_max_samples_per_chunk if audio_enabled else 0,
+            video_pixel_format=self._video_pixel_format,
         )
 
     def _restart_after_eof(self) -> None:
@@ -297,34 +341,126 @@ class LoopingMediaReader:
         self._pass_media_offset_seconds += pass_duration
         self._open_pass(first_pass=False)
 
-    def _make_video_event(self, event_time: float, frame_bgra: np.ndarray) -> MediaVideoEvent:
+    def _make_video_event(self, event_time: float, frame_data: np.ndarray) -> MediaVideoEvent:
         self._pass_event_count += 1
-        return MediaVideoEvent(self._pass_media_offset_seconds + event_time, frame_bgra)
+        return MediaVideoEvent(self._pass_media_offset_seconds + event_time, frame_data)
 
     def _make_audio_event(self, event_time: float, samples: np.ndarray) -> MediaAudioEvent:
         self._pass_event_count += 1
         return MediaAudioEvent(self._pass_media_offset_seconds + event_time, samples)
 
+    def _open_video_decoder_at(self, target_seconds: float) -> None:
+        video_container = self._video_container
+        self._video_container = None
+        self._video_stream = None
+        self._video_frames = None
+        if video_container is not None:
+            video_container.close()
+
+        self._video_container = av.open(self._video_path)
+        self._video_stream = next(stream for stream in self._video_container.streams if stream.type == "video")
+        try:
+            self._video_stream.thread_type = "AUTO"
+        except Exception:
+            pass
+
+        offset = int(max(0.0, target_seconds) * _AV_TIME_BASE)
+        self._video_container.seek(offset, any_frame=False, backward=False)
+        self._video_frames = iter(self._video_container.decode(video=0))
+
+    def _recover_video_decoder_after_error(self) -> None:
+        target_seconds = self._next_video_time_seconds + _VIDEO_DECODE_RECOVERY_SKIP_SECONDS
+        self.video_decode_recoveries += 1
+        print(
+            "[warn] reopening video decoder after decode error "
+            f"(recovery={self.video_decode_recoveries}, target={target_seconds:.3f}s)"
+        )
+        self._open_video_decoder_at(target_seconds)
+        self._next_video_time_seconds = max(self._next_video_time_seconds, target_seconds)
+
+    def _log_decode_error(self, stream_name: str, total: int, consecutive: int, exc: Exception) -> None:
+        if total <= _DECODE_ERROR_LOG_FIRST or total % _DECODE_ERROR_LOG_INTERVAL == 0:
+            print(
+                f"[warn] {stream_name} decode error skipped "
+                f"(total={total}, consecutive={consecutive}): {exc}"
+            )
+
     def _read_next_video_event_in_pass(self) -> Optional[MediaVideoEvent]:
         if self._video_frames is None:
             return None
 
-        try:
-            frame = next(self._video_frames)
-        except StopIteration:
-            self._video_frames = None
-            return None
+        while True:
+            try:
+                frame = next(self._video_frames)
+                break
+            except StopIteration:
+                self._video_frames = None
+                return None
+            except Exception as exc:
+                if not _is_pyav_decode_error(exc):
+                    raise
+                self.video_decode_errors += 1
+                self._consecutive_video_decode_errors += 1
+                self._log_decode_error(
+                    "video",
+                    self.video_decode_errors,
+                    self._consecutive_video_decode_errors,
+                    exc,
+                )
+                if self._consecutive_video_decode_errors >= _MAX_CONSECUTIVE_DECODE_ERRORS:
+                    raise RuntimeError(
+                        "Too many consecutive video decode errors. "
+                        f"The source may be corrupt or unsupported by this PyAV/FFmpeg build: '{self._video_path}'."
+                    ) from exc
+                self._recover_video_decoder_after_error()
+                continue
 
         source_time = _frame_time_seconds(frame)
         if source_time is None:
             source_time = self._next_video_time_seconds
         event_time = max(source_time, self._next_video_time_seconds)
 
-        frame_bgra = np.ascontiguousarray(frame.to_ndarray(format="bgra"), dtype=np.uint8)
+        try:
+            if self._video_pixel_format == "bgra":
+                frame_data = np.ascontiguousarray(
+                    frame.to_ndarray(format="bgra"),
+                    dtype=np.uint8,
+                )
+            else:
+                packed_frame = frame.reformat(format="uyvy422")
+                plane = packed_frame.planes[0]
+                rows = np.frombuffer(plane, dtype=np.uint8).reshape(
+                    packed_frame.height,
+                    plane.line_size,
+                )
+                frame_data = np.ascontiguousarray(
+                    rows[:, : packed_frame.width * 2],
+                    dtype=np.uint8,
+                )
+        except Exception as exc:
+            if not _is_pyav_decode_error(exc):
+                raise
+            self.video_decode_errors += 1
+            self._consecutive_video_decode_errors += 1
+            self._log_decode_error(
+                "video",
+                self.video_decode_errors,
+                self._consecutive_video_decode_errors,
+                exc,
+            )
+            if self._consecutive_video_decode_errors >= _MAX_CONSECUTIVE_DECODE_ERRORS:
+                raise RuntimeError(
+                    "Too many consecutive video conversion errors. "
+                    f"The source may be corrupt or unsupported by this PyAV/FFmpeg build: '{self._video_path}'."
+                ) from exc
+            self._recover_video_decoder_after_error()
+            return self._read_next_video_event_in_pass()
+
         duration_seconds = 1.0 / max(float(self.info.fps), 1.0)
         self._next_video_time_seconds = event_time + duration_seconds
         self._pass_max_end_seconds = max(self._pass_max_end_seconds, self._next_video_time_seconds)
-        return self._make_video_event(event_time, frame_bgra)
+        self._consecutive_video_decode_errors = 0
+        return self._make_video_event(event_time, frame_data)
 
     def _append_audio_outputs(self, outputs, start_time: float) -> None:
         current_time = start_time
@@ -334,8 +470,21 @@ class LoopingMediaReader:
             if sample_count <= 0:
                 continue
 
-            duration_seconds = sample_count / float(self._audio_sample_rate)
             event_time = max(current_time, self._next_audio_time_seconds)
+            # Trim codec padding at the video-defined loop boundary. Without
+            # this, the next pass starts after the padded container duration
+            # and the NDI receiver eventually underruns once per loop.
+            loop_duration = self.info.duration_seconds
+            remaining_samples = int(round(
+                max(0.0, loop_duration - event_time) * self._audio_sample_rate
+            ))
+            if remaining_samples <= 0:
+                continue
+            if sample_count > remaining_samples:
+                samples = np.ascontiguousarray(samples[:, :remaining_samples], dtype=np.float32)
+                sample_count = remaining_samples
+
+            duration_seconds = sample_count / float(self._audio_sample_rate)
             self._next_audio_time_seconds = event_time + duration_seconds
             self._pass_max_end_seconds = max(self._pass_max_end_seconds, self._next_audio_time_seconds)
             self._pending_audio_events.append(self._make_audio_event(event_time, samples))
@@ -362,13 +511,49 @@ class LoopingMediaReader:
                 if self._pending_audio_events:
                     return self._pending_audio_events.pop(0)
                 return None
+            except Exception as exc:
+                if not _is_pyav_decode_error(exc):
+                    raise
+                self.audio_decode_errors += 1
+                self._consecutive_audio_decode_errors += 1
+                self._log_decode_error(
+                    "audio",
+                    self.audio_decode_errors,
+                    self._consecutive_audio_decode_errors,
+                    exc,
+                )
+                if self._consecutive_audio_decode_errors >= _MAX_CONSECUTIVE_DECODE_ERRORS:
+                    raise RuntimeError(
+                        "Too many consecutive audio decode errors. "
+                        f"The source may be corrupt or unsupported by this PyAV/FFmpeg build: '{self._video_path}'."
+                    ) from exc
+                continue
 
             source_time = _frame_time_seconds(frame)
             if source_time is None:
                 source_time = self._next_audio_time_seconds
             current_time = max(source_time, self._next_audio_time_seconds)
-            self._append_audio_outputs(self._audio_resampler.resample(frame), current_time)
+            try:
+                self._append_audio_outputs(self._audio_resampler.resample(frame), current_time)
+            except Exception as exc:
+                if not _is_pyav_decode_error(exc):
+                    raise
+                self.audio_decode_errors += 1
+                self._consecutive_audio_decode_errors += 1
+                self._log_decode_error(
+                    "audio",
+                    self.audio_decode_errors,
+                    self._consecutive_audio_decode_errors,
+                    exc,
+                )
+                if self._consecutive_audio_decode_errors >= _MAX_CONSECUTIVE_DECODE_ERRORS:
+                    raise RuntimeError(
+                        "Too many consecutive audio resample errors. "
+                        f"The source may be corrupt or unsupported by this PyAV/FFmpeg build: '{self._video_path}'."
+                    ) from exc
+                continue
             if self._pending_audio_events:
+                self._consecutive_audio_decode_errors = 0
                 return self._pending_audio_events.pop(0)
 
     def read_next(self) -> MediaEvent:
@@ -400,3 +585,20 @@ class LoopingMediaReader:
             event = self._next_audio_event
             self._next_audio_event = None
             return event
+
+    def read_audio_until(self, media_time_seconds: float) -> list[MediaAudioEvent]:
+        events: list[MediaAudioEvent] = []
+        horizon = float(media_time_seconds)
+
+        while True:
+            if self._next_audio_event is None:
+                self._next_audio_event = self._read_next_audio_event_in_pass()
+
+            if self._next_audio_event is None:
+                return events
+
+            if self._next_audio_event.media_time_seconds > horizon:
+                return events
+
+            events.append(self._next_audio_event)
+            self._next_audio_event = None
