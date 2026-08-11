@@ -51,7 +51,7 @@ Important design choices:
 - Audio is no longer reconstructed by slicing a full decoded buffer per video frame.
 - NDI sender clocks are disabled in the runtime path so that timing has one authority instead of two competing ones.
 - Audio is decoded and sent on a dedicated thread so heavy video decode/overlay work cannot starve the receiver audio queue.
-- Late video frames are dropped before NDI send when needed to protect continuous audio.
+- Late video frames are dropped before NDI send when needed to protect continuous audio; video never rebases independently from the shared A/V clock.
 - The 8K launcher sends packed UYVY 4:2:2 instead of BGRA, halving frame memory and avoiding NDI's BGRA color conversion.
 - Viewport and square drawing are disabled in UYVY performance mode; metadata reception remains enabled.
 - The sender path is direct `libndi`, not `cyndilib`.
@@ -118,7 +118,19 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
 python3 stream_video.py Videos/big_buck_bunny.mp4 --no-rx-metadata
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics --source-name StreamNDI-Test
+# Optional diagnostic topology only:
+python3 stream_video.py Videos/big_buck_bunny.mp4 --source-name StreamNDI --audio-source-name StreamNDI_Audio
 ```
+
+The default and recommended ACCESS path omits `--audio-source-name`, multiplexing PCM
+with video in `StreamNDI`. Unity may still use a second `AudioOnly` receiver connection
+to that same source, preserving the dedicated video and audio processing paths while
+keeping both media types on one NDI source timeline.
+
+`--audio-source-name` remains available only for topology diagnostics. It publishes PCM
+on a separate NDI source and removes audio from the primary video source. Its NDI sender
+clock remains disabled because the audio worker already paces every PCM block against
+the application-owned media timeline.
 
 Convenience launchers also accept diagnostics through environment variables:
 
@@ -140,6 +152,8 @@ Correlate these fields first:
 - `audio_gap_count`, `audio_gap_ms_max`: decoded audio timeline has a gap.
 - `audio_send_ms_max`: NDI audio send call is taking too long.
 - `video_drops`: late video frames intentionally dropped to keep audio continuous.
+- `video_late_ms_max`: maximum lateness against the shared, non-rebased media clock.
+- `av_media_delta_ms`: latest audio media timestamp minus the video media timestamp; it should stay close to zero instead of growing over time.
 - `video_gap_count`, `video_gap_ms_max`: visible output stalls between sent video frames.
 - `video_read_ms_max`, `video_read_slow`: PyAV/decode/conversion was slow.
 - `video_send_ms_max`, `video_send_slow`: NDI video send call was slow or blocked.

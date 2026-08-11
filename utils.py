@@ -46,6 +46,8 @@ def make_sender(
     height: int,
     fps: Fraction,
     video_pixel_format: str = "bgra",
+    clock_video: bool = False,
+    clock_audio: bool = False,
 ) -> tuple:
     """Create and configure a minimal native libndi sender for one NDI output."""
     sender = NativeNdiSender(
@@ -53,8 +55,8 @@ def make_sender(
         width,
         height,
         fps,
-        clock_video=False,
-        clock_audio=False,
+        clock_video=clock_video,
+        clock_audio=clock_audio,
         video_pixel_format=video_pixel_format,
     )
     return sender, None

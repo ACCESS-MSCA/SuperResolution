@@ -13,6 +13,7 @@ Usage:
     python stream_video.py <path_to_video> --diagnostics
     python stream_video.py <path_to_video> --diagnostics-file Logs/run.jsonl
     python stream_video.py <path_to_video> --source-name StreamNDI-Test
+    python stream_video.py <path_to_video> --audio-source-name StreamNDI_Audio
     python stream_video.py <path_to_video> --video-prefetch-frames 4 --preload-audio
 """
 
@@ -41,7 +42,7 @@ _GAZE_MARKER_THICKNESS_PIXELS = 3
 _ERP_FRUSTUM_EDGE_SAMPLES = 96
 _AUDIO_LATE_WARN_SECONDS = 0.020
 _AUDIO_THREAD_LATE_LOG_INTERVAL = 120
-_VIDEO_AUDIO_FIRST_DROP_SECONDS = 0.050
+_VIDEO_DROP_LATE_FRAME_FACTOR = 1.0
 _VIDEO_DROP_LOG_INTERVAL = 60
 _DIAGNOSTIC_INTERVAL_SECONDS = 1.0
 _DIAGNOSTIC_VIDEO_GAP_FACTOR = 2.5
@@ -626,10 +627,10 @@ def _wait_until_media_deadline(
                 f"(latest overrun: {late_seconds * 1000.0:.2f} ms)"
             )
 
-    if late_seconds > 0.250:
-        relative_media_time = media_time_seconds - first_media_time_seconds
-        playback_start_monotonic = now - relative_media_time
-
+    # Never rebase video independently after a long decode/send stall. Audio
+    # uses this original media clock too; moving only the video origin makes
+    # every rebase permanent A/V drift. The video loop drops expired frames
+    # instead, so both streams remain on the same source timeline.
     return playback_start_monotonic, late_count
 
 
@@ -650,8 +651,14 @@ def _deadline_lateness_seconds(
     return max(0.0, time.monotonic() - deadline)
 
 
-def _send_audio_event(sender_plain, sender_overlay, event) -> None:
-    sender_plain.write_audio(event.samples)
+def _send_audio_event(sender_plain, sender_overlay, sender_audio, event) -> None:
+    # A dedicated audio-only NDI source keeps the tiny PCM stream off the
+    # high-bandwidth 8K receiver connection. When it is configured, do not
+    # duplicate audio into the primary video source.
+    if sender_audio is not None:
+        sender_audio.write_audio(event.samples)
+    else:
+        sender_plain.write_audio(event.samples)
     if sender_overlay is not None:
         sender_overlay.write_audio(event.samples)
 
@@ -734,6 +741,7 @@ def _run_audio_sender(
     video_path: str,
     sender_plain,
     sender_overlay,
+    sender_audio,
     worker_ready: threading.Event,
     clock_ready: threading.Event,
     stop_event: threading.Event,
@@ -856,7 +864,7 @@ def _run_audio_sender(
                 break
 
             send_started = time.monotonic()
-            _send_audio_event(sender_plain, sender_overlay, event)
+            _send_audio_event(sender_plain, sender_overlay, sender_audio, event)
             send_ms = (time.monotonic() - send_started) * 1000.0
             stats["send_ms_max"] = max(stats.get("send_ms_max", 0.0), send_ms)
             if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
@@ -868,6 +876,7 @@ def _run_audio_sender(
                     samples=sample_count,
                 )
             stats["events"] += 1
+            stats["last_sent_media_time"] = event.media_time_seconds
 
     except Exception as exc:
         stats["error"] = exc
@@ -881,6 +890,7 @@ def _run_audio_sender(
 def stream_video(
     video_path: str,
     source_name: str = "StreamNDI",
+    audio_source_name: str | None = None,
     dual: bool = False,
     rx_metadata: bool = True,
     rx_metadata_verbose: bool = False,
@@ -924,6 +934,11 @@ def stream_video(
     fps = media_info.fps
     total_frames = media_info.total_video_frames
     fps_float = float(fps)
+    expected_video_interval = 1.0 / max(fps_float, 1.0)
+    video_drop_late_threshold = max(
+        0.020,
+        expected_video_interval * _VIDEO_DROP_LATE_FRAME_FACTOR,
+    )
 
     print(f"Source  : {video_path}")
     print(f"Size    : {width}x{height} @ {fps_float:.3f} fps ({total_frames} frames)")
@@ -954,9 +969,12 @@ def stream_video(
         video_prefetch_frames=max(0, int(video_prefetch_frames)),
         preload_audio=bool(preload_audio),
         preload_audio_requested=preload_audio_requested,
+        audio_source_name=audio_source_name,
+        video_drop_late_ms=round(video_drop_late_threshold * 1000.0, 3),
     )
 
     audio_enabled = media_info.audio_enabled
+    sender_audio = None
     if audio_enabled:
         _configure_audio_frame(
             sender_plain,
@@ -968,6 +986,28 @@ def stream_video(
             f"Audio   : {media_info.audio_sample_rate} Hz, {media_info.audio_channels} ch, "
             f"up to {media_info.audio_max_samples_per_chunk} samples/chunk"
         )
+
+        if audio_source_name:
+            if audio_source_name == source_name:
+                raise ValueError("Dedicated audio source name must differ from the video source name.")
+            sender_audio, _ = make_sender(
+                audio_source_name,
+                width,
+                height,
+                fps,
+                video_pixel_format=media_info.video_pixel_format,
+                # The audio worker already waits on the shared media deadline.
+                # Enabling the NDI sender clock here would pace every chunk a
+                # second time, turning transient send stalls into audio bursts.
+                clock_audio=False,
+            )
+            _configure_audio_frame(
+                sender_audio,
+                media_info.audio_sample_rate,
+                media_info.audio_channels,
+                media_info.audio_max_samples_per_chunk,
+            )
+            print(f"NDI audio: '{audio_source_name}' (dedicated audio-only source)")
     else:
         print("Audio   : disabled (source has no audio stream)")
 
@@ -1009,10 +1049,10 @@ def stream_video(
     video_prefetch_wait_ms_max = 0.0
     video_send_ms_max = 0.0
     video_send_slow_count = 0
+    video_late_ms_max = 0.0
     video_gap_ms_max = 0.0
     video_gap_count = 0
     last_video_send_monotonic = None
-    expected_video_interval = 1.0 / max(fps_float, 1.0)
     audio_thread = None
     audio_stop_event = None
     audio_worker_ready = None
@@ -1034,6 +1074,7 @@ def stream_video(
         "send_slow_count": 0,
         "read_ms_max": 0.0,
         "read_slow_count": 0,
+        "last_sent_media_time": None,
         "error": None,
     }
 
@@ -1047,6 +1088,8 @@ def stream_video(
     with sender_plain:
         if sender_overlay is not None:
             sender_overlay.__enter__()
+        if sender_audio is not None:
+            sender_audio.__enter__()
 
         if audio_enabled:
             audio_stop_event = threading.Event()
@@ -1058,6 +1101,7 @@ def stream_video(
                     video_path,
                     sender_plain,
                     sender_overlay,
+                    sender_audio,
                     audio_worker_ready,
                     audio_clock_ready,
                     audio_stop_event,
@@ -1162,7 +1206,11 @@ def stream_video(
                         first_media_time_seconds,
                         event.media_time_seconds,
                     )
-                    if video_late_seconds > _VIDEO_AUDIO_FIRST_DROP_SECONDS:
+                    video_late_ms_max = max(
+                        video_late_ms_max,
+                        video_late_seconds * 1000.0,
+                    )
+                    if video_late_seconds > video_drop_late_threshold:
                         video_drop_count += 1
                         if video_drop_count % _VIDEO_DROP_LOG_INTERVAL == 0:
                             print(
@@ -1237,6 +1285,7 @@ def stream_video(
                         video_sent=video_sent_count,
                         video_drops=video_drop_count,
                         video_late=late_count,
+                        video_late_ms_max=video_late_ms_max,
                         video_gap_count=video_gap_count,
                         video_gap_ms_max=video_gap_ms_max,
                         video_read_ms_max=video_decode_read_ms_max,
@@ -1258,11 +1307,21 @@ def stream_video(
                         audio_send_slow=audio_stats["send_slow_count"],
                         audio_read_ms_max=audio_stats["read_ms_max"],
                         audio_read_slow=audio_stats["read_slow_count"],
+                        audio_media_time=audio_stats["last_sent_media_time"],
+                        av_media_delta_ms=(
+                            None
+                            if audio_stats["last_sent_media_time"] is None
+                            else round(
+                                (audio_stats["last_sent_media_time"] - event.media_time_seconds)
+                                * 1000.0,
+                                3,
+                            )
+                        ),
                     )
                     continue
 
                 if isinstance(event, MediaAudioEvent):
-                    _send_audio_event(sender_plain, sender_overlay, event)
+                    _send_audio_event(sender_plain, sender_overlay, sender_audio, event)
                     continue
 
         except KeyboardInterrupt:
@@ -1305,6 +1364,8 @@ def stream_video(
                     print(f"[warn] backchannel last error: {backchannel.last_error}")
 
             media_reader.close()
+            if sender_audio is not None:
+                sender_audio.__exit__(None, None, None)
             if sender_overlay is not None:
                 sender_overlay.__exit__(None, None, None)
             diagnostics.emit(
@@ -1332,6 +1393,7 @@ if __name__ == "__main__":
     video_prefetch_frames = 0
     preload_audio = "--preload-audio" in args
     source_name = "StreamNDI"
+    audio_source_name = None
 
     if "--video-prefetch-frames" in args:
         prefetch_index = args.index("--video-prefetch-frames")
@@ -1358,6 +1420,14 @@ if __name__ == "__main__":
             raise SystemExit("--source-name requires a name") from exc
         del args[source_name_index:source_name_index + 2]
 
+    if "--audio-source-name" in args:
+        audio_source_name_index = args.index("--audio-source-name")
+        try:
+            audio_source_name = args[audio_source_name_index + 1]
+        except IndexError as exc:
+            raise SystemExit("--audio-source-name requires a name") from exc
+        del args[audio_source_name_index:audio_source_name_index + 2]
+
     args = [
         a
         for a in args
@@ -1376,6 +1446,7 @@ if __name__ == "__main__":
     stream_video(
         video,
         source_name=source_name,
+        audio_source_name=audio_source_name,
         dual=dual,
         rx_metadata=rx_metadata,
         rx_metadata_verbose=rx_metadata_verbose,
