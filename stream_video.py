@@ -49,7 +49,10 @@ _DIAGNOSTIC_VIDEO_GAP_FACTOR = 2.5
 _DIAGNOSTIC_AUDIO_GAP_SECONDS = 0.030
 _DIAGNOSTIC_SEND_WARN_SECONDS = 0.020
 _DIAGNOSTIC_READ_WARN_SECONDS = 0.050
-_AUDIO_PRELOAD_MAX_DURATION_SECONDS = 120.0
+_AUDIO_PRELOAD_MAX_BYTES = 256 * 1024 * 1024
+_AUDIO_OUTPUT_SAMPLE_RATE = 48000
+_AUDIO_OUTPUT_CHANNELS = 2
+_AUDIO_OUTPUT_BYTES_PER_SAMPLE = np.dtype(np.float32).itemsize
 
 
 class _VideoPrefetcher:
@@ -918,16 +921,31 @@ def stream_video(
     media_info = media_reader.info
 
     preload_audio_requested = bool(preload_audio)
+    audio_preload_duration_seconds = float(media_info.duration_seconds)
+    audio_preload_duration_valid = bool(
+        np.isfinite(audio_preload_duration_seconds)
+        and audio_preload_duration_seconds > 0.0
+    )
+    audio_preload_estimated_bytes = int(
+        audio_preload_duration_seconds
+        * _AUDIO_OUTPUT_SAMPLE_RATE
+        * _AUDIO_OUTPUT_CHANNELS
+        * _AUDIO_OUTPUT_BYTES_PER_SAMPLE
+    ) if audio_preload_duration_valid else 0
     preload_audio = bool(
         preload_audio_requested
-        and media_info.duration_seconds <= _AUDIO_PRELOAD_MAX_DURATION_SECONDS
+        and audio_preload_duration_valid
+        and audio_preload_estimated_bytes <= _AUDIO_PRELOAD_MAX_BYTES
     )
     if preload_audio_requested and not preload_audio:
-        print(
-            "[info] audio preload disabled for long source "
-            f"({media_info.duration_seconds:.1f}s > "
-            f"{_AUDIO_PRELOAD_MAX_DURATION_SECONDS:.0f}s)"
-        )
+        if not audio_preload_duration_valid:
+            print("[info] audio preload disabled because source duration is unavailable")
+        else:
+            print(
+                "[info] audio preload disabled by memory budget "
+                f"({audio_preload_estimated_bytes / (1024 * 1024):.1f} MiB > "
+                f"{_AUDIO_PRELOAD_MAX_BYTES / (1024 * 1024):.0f} MiB)"
+            )
 
     width = media_info.width
     height = media_info.height
@@ -969,6 +987,14 @@ def stream_video(
         video_prefetch_frames=max(0, int(video_prefetch_frames)),
         preload_audio=bool(preload_audio),
         preload_audio_requested=preload_audio_requested,
+        audio_preload_estimated_mib=round(
+            audio_preload_estimated_bytes / (1024 * 1024),
+            3,
+        ),
+        audio_preload_budget_mib=round(
+            _AUDIO_PRELOAD_MAX_BYTES / (1024 * 1024),
+            3,
+        ),
         audio_source_name=audio_source_name,
         video_drop_late_ms=round(video_drop_late_threshold * 1000.0, 3),
     )

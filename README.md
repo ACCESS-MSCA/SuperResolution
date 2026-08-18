@@ -127,6 +127,11 @@ with video in `StreamNDI`. Unity may still use a second `AudioOnly` receiver con
 to that same source, preserving the dedicated video and audio processing paths while
 keeping both media types on one NDI source timeline.
 
+The 8K launcher also requests audio preloading. Eligibility is based on the decoded PCM
+memory estimate (256 MiB budget), rather than an arbitrary duration cutoff, so clips such
+as the 128-second Ghost Town test keep audio in RAM and remain isolated from video decode
+or storage stalls.
+
 `--audio-source-name` remains available only for topology diagnostics. It publishes PCM
 on a separate NDI source and removes audio from the primary video source. Its NDI sender
 clock remains disabled because the audio worker already paces every PCM block against
