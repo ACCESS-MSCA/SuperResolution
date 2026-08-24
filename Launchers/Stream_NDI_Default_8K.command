@@ -23,15 +23,18 @@ fi
 
 cd "$REPO_DIR"
 
-echo "[NDI] Starting default quality stream (metadata RX enabled)..."
+source "$SCRIPT_DIR/_ndi_runtime.zsh"
+
+VIDEO_PATH="$(ndi_resolve_video "$REPO_DIR" "$VIDEO_PATH")" || {
+    ndi_fail "Selecciona un vídeo existente o define NDI_VIDEO_PATH con su ruta."
+    exit 1
+}
+
+ndi_prepare_python "$REPO_DIR" || exit 1
+
+echo "[NDI] Starting 8K performance stream (UYVY, metadata RX enabled)..."
 echo "[NDI] Repo: $REPO_DIR"
 echo "[NDI] Video: $VIDEO_PATH"
 echo "[NDI] Video prefetch: $VIDEO_PREFETCH_FRAMES frames"
 
-if [[ ! -f "$VIDEO_PATH" ]]; then
-    echo "[NDI] ERROR: video file not found: $REPO_DIR/$VIDEO_PATH" >&2
-    echo "[NDI] Set NDI_VIDEO_PATH or update VIDEO_PATH in this launcher." >&2
-    exit 1
-fi
-
-python3 ./stream_video.py "$VIDEO_PATH" --uyvy "${EXTRA_ARGS[@]}"
+"$NDI_PYTHON" ./stream_video.py "$VIDEO_PATH" --uyvy "${EXTRA_ARGS[@]}"

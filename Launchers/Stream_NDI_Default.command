@@ -15,6 +15,9 @@ fi
 
 cd "$REPO_DIR"
 
+source "$SCRIPT_DIR/_ndi_runtime.zsh"
+ndi_prepare_python "$REPO_DIR" || exit 1
+
 echo "[NDI] Starting default quality stream (metadata RX enabled)..."
 echo "[NDI] Repo: $REPO_DIR"
-python3 ./stream_video.py Videos/big_buck_bunny.mp4 "${EXTRA_ARGS[@]}"
+"$NDI_PYTHON" ./stream_video.py Videos/big_buck_bunny.mp4 "${EXTRA_ARGS[@]}"

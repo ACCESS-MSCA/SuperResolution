@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import ctypes
 import ctypes.util
+import os
 import threading
 import time
 from pathlib import Path
@@ -77,6 +78,9 @@ class _NdiRuntime:
 
     def _load_lib(self):
         candidates = []
+        configured_path = os.environ.get("NDI_RUNTIME_PATH")
+        if configured_path:
+            candidates.append(configured_path)
         for name in ("libndi", "ndi", "libndi.dylib", "Processing.NDI.Lib.x64"):
             found = ctypes.util.find_library(name)
             if found:
@@ -92,6 +96,9 @@ class _NdiRuntime:
             pass
 
         candidates.extend([
+            "/Library/NDI SDK for Apple/lib/macOS/libndi.dylib",
+            "/Library/CoreMediaIO/Plug-Ins/DAL/NDIVideoOut.plugin/Contents/Frameworks/libndi.dylib",
+            "/Applications/NDI Scan Converter.app/Contents/Frameworks/libndi.dylib",
             "/usr/local/lib/libndi.dylib",
             "libndi.dylib",
             "libndi",

@@ -17,6 +17,9 @@ fi
 
 cd "$REPO_DIR"
 
+source "$SCRIPT_DIR/_ndi_runtime.zsh"
+ndi_prepare_python "$REPO_DIR" || exit 1
+
 if [[ ! -f "$LOWRES_VIDEO" ]]; then
   echo "[NDI] LowRes file not found. Generating $LOWRES_VIDEO from $SOURCE_VIDEO ..."
   ffmpeg -y -i "$SOURCE_VIDEO" -vf "scale=640:360,fps=24" -c:v libx264 -preset veryfast -crf 23 -c:a aac -ar 48000 -ac 2 "$LOWRES_VIDEO"
@@ -24,4 +27,4 @@ fi
 
 echo "[NDI] Starting lowres WAN profile stream (metadata RX enabled)..."
 echo "[NDI] Repo: $REPO_DIR"
-python3 ./stream_video.py "$LOWRES_VIDEO" "${EXTRA_ARGS[@]}"
+"$NDI_PYTHON" ./stream_video.py "$LOWRES_VIDEO" "${EXTRA_ARGS[@]}"
