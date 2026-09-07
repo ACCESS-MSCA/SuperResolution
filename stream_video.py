@@ -37,6 +37,8 @@ from utils import draw_square, make_sender
 
 _ERP_ROI_MASK_CACHE: dict[tuple, np.ndarray] = {}
 _ROI_POLYGON_MASK_CACHE: dict[tuple, np.ndarray] = {}
+_ERP_ROI_UYVY_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+_ROI_POLYGON_UYVY_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 _GAZE_MARKER_RADIUS_PIXELS = 12
 _GAZE_MARKER_THICKNESS_PIXELS = 3
 _ERP_FRUSTUM_EDGE_SAMPLES = 96
@@ -607,6 +609,345 @@ def _draw_viewport_roi(frame_bgra: np.ndarray, viewport: UnityViewportMetadata, 
     _draw_gaze_hit_marker(frame_bgra, viewport)
 
 
+def _rgb_to_uyvy_bt709_limited(red: int, green: int, blue: int) -> tuple[int, int, int]:
+    """Return U, Y and V bytes for limited-range BT.709 UYVY video."""
+    r = _clamp01(float(red) / 255.0)
+    g = _clamp01(float(green) / 255.0)
+    b = _clamp01(float(blue) / 255.0)
+    luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    y = 16.0 + 219.0 * luma
+    u = 128.0 + 224.0 * ((b - luma) / (2.0 * (1.0 - 0.0722)))
+    v = 128.0 + 224.0 * ((r - luma) / (2.0 * (1.0 - 0.2126)))
+    return (
+        int(np.clip(np.rint(u), 0, 255)),
+        int(np.clip(np.rint(y), 0, 255)),
+        int(np.clip(np.rint(v), 0, 255)),
+    )
+
+
+def _uyvy_pair_view(frame_uyvy: np.ndarray) -> np.ndarray:
+    """Expose packed UYVY bytes as [height, pixel_pair, U/Y0/V/Y1]."""
+    if frame_uyvy.dtype != np.uint8 or frame_uyvy.ndim != 2:
+        raise ValueError("UYVY frame must be a two-dimensional uint8 array.")
+    if frame_uyvy.shape[1] % 4 != 0:
+        raise ValueError("UYVY rows must contain complete four-byte pixel pairs.")
+    if not frame_uyvy.flags.c_contiguous:
+        raise ValueError("UYVY frame must be C-contiguous.")
+    if not frame_uyvy.flags.writeable:
+        raise ValueError("UYVY frame must be writeable for in-place overlay drawing.")
+    return frame_uyvy.reshape(frame_uyvy.shape[0], frame_uyvy.shape[1] // 4, 4)
+
+
+def _empty_pixel_indices() -> tuple[np.ndarray, np.ndarray]:
+    return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+
+def _rasterize_polyline_pixels(
+    width: int,
+    height: int,
+    pts: list[tuple[int, int]],
+    thickness: int,
+    closed: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rasterize an outline to sparse y/x indices without a full-frame mask."""
+    if len(pts) < 2 or width < 1 or height < 1:
+        return _empty_pixel_indices()
+
+    t = max(1, int(thickness))
+    offset_values = np.arange(-(t // 2), (t + 1) // 2, dtype=np.int32)
+    offset_x, offset_y = np.meshgrid(offset_values, offset_values)
+    offset_x = offset_x.ravel()
+    offset_y = offset_y.ravel()
+    xs_chunks: list[np.ndarray] = []
+    ys_chunks: list[np.ndarray] = []
+    segment_count = len(pts) if closed else len(pts) - 1
+
+    for i in range(segment_count):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % len(pts)]
+        steps = max(abs(x1 - x0), abs(y1 - y0), 1)
+        center_x = np.rint(np.linspace(x0, x1, steps + 1)).astype(np.int32)
+        center_y = np.rint(np.linspace(y0, y1, steps + 1)).astype(np.int32)
+        xs = (center_x[:, None] + offset_x[None, :]).ravel()
+        ys = (center_y[:, None] + offset_y[None, :]).ravel()
+        valid = (xs >= 0) & (xs < width) & (ys >= 0) & (ys < height)
+        if np.any(valid):
+            xs_chunks.append(xs[valid])
+            ys_chunks.append(ys[valid])
+
+    if not xs_chunks:
+        return _empty_pixel_indices()
+    return np.concatenate(ys_chunks), np.concatenate(xs_chunks)
+
+
+def _combine_pixel_indices(
+    chunks: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray]:
+    populated = [(ys, xs) for ys, xs in chunks if ys.size]
+    if not populated:
+        return _empty_pixel_indices()
+    return (
+        np.concatenate([ys for ys, _ in populated]),
+        np.concatenate([xs for _, xs in populated]),
+    )
+
+
+def _apply_uyvy_pixels(
+    pair_view: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    if ys.size == 0:
+        return
+    u, y, v = color
+    pair_x = xs >> 1
+    pair_view[ys, pair_x, 0] = u
+    pair_view[ys, pair_x, 2] = v
+    even = (xs & 1) == 0
+    pair_view[ys[even], pair_x[even], 1] = y
+    pair_view[ys[~even], pair_x[~even], 3] = y
+
+
+def _fill_uyvy_rect(
+    pair_view: np.ndarray,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    color: tuple[int, int, int],
+) -> None:
+    height, pair_width = pair_view.shape[:2]
+    width = pair_width * 2
+    x0 = max(0, min(width, int(x0)))
+    x1 = max(0, min(width, int(x1)))
+    y0 = max(0, min(height, int(y0)))
+    y1 = max(0, min(height, int(y1)))
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    u, y, v = color
+    first_pair = x0 // 2
+    last_pair = (x1 + 1) // 2
+    pair_view[y0:y1, first_pair:last_pair, 0] = u
+    pair_view[y0:y1, first_pair:last_pair, 2] = v
+
+    first_even_pair = (x0 + 1) // 2
+    last_even_pair = (x1 + 1) // 2
+    pair_view[y0:y1, first_even_pair:last_even_pair, 1] = y
+    first_odd_pair = x0 // 2
+    last_odd_pair = x1 // 2
+    pair_view[y0:y1, first_odd_pair:last_odd_pair, 3] = y
+
+
+def _draw_equirectangular_frustum_roi_uyvy(
+    pair_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int,
+    color: tuple[int, int, int],
+) -> bool:
+    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+    if height < 2 or width < 2:
+        return False
+
+    t = max(1, int(thickness))
+    corners = np.asarray(viewport.erp_corner_directions, dtype=np.float32)
+    if corners.shape != (4, 3):
+        return False
+
+    normalized_corners: list[np.ndarray] = []
+    for corner in corners:
+        normalized = _normalize_vector(corner)
+        if normalized is None:
+            return False
+        normalized_corners.append(normalized)
+
+    corner_key = tuple(
+        tuple(round(float(component), 6) for component in corner)
+        for corner in normalized_corners
+    )
+    cache_key = (width, height, t, _ERP_FRUSTUM_EDGE_SAMPLES, corner_key)
+    cached = _ERP_ROI_UYVY_PIXEL_CACHE.get(cache_key)
+    if cached is None:
+        chunks: list[tuple[np.ndarray, np.ndarray]] = []
+        samples = max(8, int(_ERP_FRUSTUM_EDGE_SAMPLES))
+        for edge_index in range(4):
+            start = normalized_corners[edge_index]
+            end = normalized_corners[(edge_index + 1) & 3]
+            uv_points = [
+                _direction_to_erp_uv(_slerp_direction(start, end, i / samples))
+                for i in range(samples + 1)
+            ]
+            for segment in _split_erp_polyline_at_seam(uv_points):
+                pts = [
+                    (
+                        int(round(_clamp01(u) * (width - 1))),
+                        int(round((1.0 - _clamp01(v)) * (height - 1))),
+                    )
+                    for u, v in segment
+                ]
+                chunks.append(
+                    _rasterize_polyline_pixels(width, height, pts, t, closed=False)
+                )
+        cached = _combine_pixel_indices(chunks)
+        if cached[0].size == 0:
+            return False
+        _ERP_ROI_UYVY_PIXEL_CACHE.clear()
+        _ERP_ROI_UYVY_PIXEL_CACHE[cache_key] = cached
+
+    _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
+    return True
+
+
+def _draw_uv_polygon_roi_uyvy(
+    pair_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int,
+    color: tuple[int, int, int],
+    is_equirectangular: bool,
+) -> bool:
+    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+    if height < 2 or width < 2:
+        return False
+
+    corners = list(viewport.uv_polygon)
+    if len(corners) < 3:
+        return False
+
+    t = max(1, int(thickness))
+    polygon_key = tuple((round(float(u), 6), round(float(v), 6)) for u, v in corners)
+    cache_key = (
+        width,
+        height,
+        t,
+        is_equirectangular,
+        viewport.contains_north_pole,
+        viewport.contains_south_pole,
+        polygon_key,
+    )
+    cached = _ROI_POLYGON_UYVY_PIXEL_CACHE.get(cache_key)
+    if cached is not None:
+        _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
+        return True
+
+    ordered = _unwrap_polygon_u(corners) if is_equirectangular else corners
+    if is_equirectangular:
+        u_min = min(u for u, _ in ordered)
+        u_max = max(u for u, _ in ordered)
+        tile_min = int(np.floor(u_min))
+        tile_max = int(np.floor(u_max))
+        if abs(u_max - tile_max) < 1e-6:
+            tile_max -= 1
+        tile_max = max(tile_min, tile_max)
+        tile_ranges = [(float(tile), float(tile + 1)) for tile in range(tile_min, tile_max + 1)]
+    else:
+        tile_ranges = [(0.0, 1.0)]
+
+    chunks: list[tuple[np.ndarray, np.ndarray]] = []
+    for tile_left, tile_right in tile_ranges:
+        polygon = ordered
+        if is_equirectangular and viewport.contains_north_pole and not viewport.contains_south_pole:
+            polygon = ordered + [
+                (ordered[-1][0], 1.0),
+                (tile_right, 1.0),
+                (tile_left, 1.0),
+                (ordered[0][0], 1.0),
+            ]
+        elif is_equirectangular and viewport.contains_south_pole and not viewport.contains_north_pole:
+            polygon = ordered + [
+                (ordered[-1][0], 0.0),
+                (tile_right, 0.0),
+                (tile_left, 0.0),
+                (ordered[0][0], 0.0),
+            ]
+
+        clipped = (
+            _clip_polygon_rect(polygon, tile_left, tile_right, 0.0, 1.0)
+            if is_equirectangular
+            else _clip_polygon_unit_square(polygon)
+        )
+        if len(clipped) < 3:
+            continue
+
+        pts = []
+        for u, v in clipped:
+            draw_u = (u - tile_left) if is_equirectangular else _clamp01(u)
+            pts.append(
+                (
+                    int(round(_clamp01(draw_u) * (width - 1))),
+                    int(round((1.0 - _clamp01(v)) * (height - 1))),
+                )
+            )
+        chunks.append(_rasterize_polyline_pixels(width, height, pts, t, closed=True))
+
+    cached = _combine_pixel_indices(chunks)
+    if cached[0].size == 0:
+        return False
+    _ROI_POLYGON_UYVY_PIXEL_CACHE.clear()
+    _ROI_POLYGON_UYVY_PIXEL_CACHE[cache_key] = cached
+    _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
+    return True
+
+
+def _draw_gaze_hit_marker_uyvy(
+    pair_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+) -> None:
+    if not viewport.gaze_hit:
+        return
+
+    u, v = viewport.gaze_uv
+    if not (np.isfinite(u) and np.isfinite(v)):
+        return
+    if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+        return
+
+    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+    if height < 2 or width < 2:
+        return
+
+    x = int(round(u * (width - 1)))
+    y = int(round((1.0 - v) * (height - 1)))
+    radius = min(_GAZE_MARKER_RADIUS_PIXELS, max(2, min(width, height) // 8))
+    thickness = max(1, _GAZE_MARKER_THICKNESS_PIXELS)
+    shadow = _rgb_to_uyvy_bt709_limited(0, 0, 0)
+    yellow = _rgb_to_uyvy_bt709_limited(255, 255, 0)
+
+    def draw_cross(color: tuple[int, int, int], r: int, t: int) -> None:
+        half = max(0, t // 2)
+        _fill_uyvy_rect(pair_view, x - r, y - half, x + r + 1, y + half + 1, color)
+        _fill_uyvy_rect(pair_view, x - half, y - r, x + half + 1, y + r + 1, color)
+
+    draw_cross(shadow, radius + 1, thickness + 2)
+    draw_cross(yellow, radius, thickness)
+
+
+def _draw_viewport_roi_uyvy(
+    frame_uyvy: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int = 4,
+) -> None:
+    """Draw viewport ROI directly into a packed UYVY 4:2:2 frame in-place."""
+    if not viewport.plane_intersection and not viewport.gaze_hit:
+        return
+
+    pair_view = _uyvy_pair_view(frame_uyvy)
+    red = _rgb_to_uyvy_bt709_limited(255, 0, 0)
+    t = max(1, int(thickness))
+    is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
+
+    if is_equirectangular and viewport.erp_frustum_valid:
+        if _draw_equirectangular_frustum_roi_uyvy(pair_view, viewport, t, red):
+            _draw_gaze_hit_marker_uyvy(pair_view, viewport)
+            return
+
+    if _draw_uv_polygon_roi_uyvy(pair_view, viewport, t, red, is_equirectangular):
+        _draw_gaze_hit_marker_uyvy(pair_view, viewport)
+        return
+
+    _draw_gaze_hit_marker_uyvy(pair_view, viewport)
+
+
 def _wait_until_media_deadline(
     playback_start_monotonic: float,
     first_media_time_seconds: float,
@@ -1107,7 +1448,6 @@ def stream_video(
     backchannel = None
     dispatcher = None
     viewport_handler = None
-    uyvy_overlay_warning_emitted = False
     viewport_stale_timeout_seconds = 3.0
     video_prefetcher = None
 
@@ -1252,23 +1592,21 @@ def stream_video(
                         continue
 
                     frame_data = event.frame_data
-                    if (
-                        media_info.video_pixel_format == "bgra"
-                        and viewport_handler is not None
-                        and viewport_handler.state.latest is not None
-                    ):
+                    if viewport_handler is not None and viewport_handler.state.latest is not None:
                         age = time.monotonic() - viewport_handler.state.last_update_monotonic
                         if age <= viewport_stale_timeout_seconds:
-                            frame_data = np.array(event.frame_data, copy=True)
-                            _draw_viewport_roi(frame_data, viewport_handler.state.latest)
-                    elif (
-                        media_info.video_pixel_format == "uyvy422"
-                        and viewport_handler is not None
-                        and viewport_handler.state.latest is not None
-                        and not uyvy_overlay_warning_emitted
-                    ):
-                        print("[info] viewport drawing is disabled for UYVY performance mode")
-                        uyvy_overlay_warning_emitted = True
+                            if media_info.video_pixel_format == "bgra":
+                                frame_data = np.array(event.frame_data, copy=True)
+                                _draw_viewport_roi(frame_data, viewport_handler.state.latest)
+                            elif media_info.video_pixel_format == "uyvy422":
+                                if not frame_data.flags.c_contiguous or not frame_data.flags.writeable:
+                                    frame_data = np.ascontiguousarray(frame_data)
+                                    if not frame_data.flags.writeable:
+                                        frame_data = np.array(frame_data, copy=True)
+                                _draw_viewport_roi_uyvy(
+                                    frame_data,
+                                    viewport_handler.state.latest,
+                                )
 
                     plain_frame = frame_data.ravel()
                     send_started = time.monotonic()

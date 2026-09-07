@@ -23,6 +23,7 @@ Este indice enlaza las guias operativas, el contrato de metadata, los manuales t
 
 - Manual de arquitectura del streaming: `manual_tecnico_streaming_ndi_es.md`
 - Version HTML: `manual_tecnico_streaming_ndi_es.html`
+- Guia simplificada de video ideal y optimizacion 8K: `video_ideal_y_optimizacion_streaming_8k_es.md`
 
 ## Notas de entrega
 

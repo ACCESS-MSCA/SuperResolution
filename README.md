@@ -1,6 +1,6 @@
 # SuperResolution - NDI Streaming Base
 
-Updated: 2026-07-06
+Updated: 2026-09-07
 
 ## Overview
 
@@ -53,7 +53,7 @@ Important design choices:
 - Audio is decoded and sent on a dedicated thread so heavy video decode/overlay work cannot starve the receiver audio queue.
 - Late video frames are dropped before NDI send when needed to protect continuous audio; video never rebases independently from the shared A/V clock.
 - The 8K launcher sends packed UYVY 4:2:2 instead of BGRA, halving frame memory and avoiding NDI's BGRA color conversion.
-- Viewport and square drawing are disabled in UYVY performance mode; metadata reception remains enabled.
+- Unity viewport ROI and gaze-marker drawing run directly on the packed UYVY buffer, without converting or copying the full 8K frame. The optional `--dual` square output remains BGRA-only.
 - The sender path is direct `libndi`, not `cyndilib`.
 
 ## Key Files
@@ -223,6 +223,7 @@ Recommended ongoing QA:
 | AVFoundation duplicate-class warning on startup | NDI HX Driver and PyAV both load FFmpeg AVFoundation classes | Remove/disable the conflicting NDI HX FFmpeg driver for production validation |
 | Video stutter under load | Decode or host pressure | Reduce source complexity and monitor timing warnings |
 | Metadata overlay missing | Unity backchannel or stale metadata | Check sender console and Unity metadata sender |
+| Metadata arrives but ROI is absent in UYVY | Invalid/stale viewport geometry or an older sender checkout | Check `[RX Viewport]`, then run the current `stream_video.py`; UYVY viewport drawing is supported in-place |
 
 ## Design Decisions
 
