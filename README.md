@@ -38,8 +38,8 @@ Additional delivery context is available in `Documentation/Deliverable/unity_gaz
 The streamer now uses one authoritative media timeline.
 
 ```text
-CLI -> LoopingMediaReader(PyAV) -> ordered media events (video/audio)
-    -> single playback clock in stream_video.py
+CLI -> persistent looping PyAV decoder -> video events
+    -> continuous fixed-size PCM block source -> native NDI audio clock
     -> NativeNdiSender(libndi)
     -> optional dual output overlay
     -> optional Unity metadata backchannel overlay
@@ -47,13 +47,16 @@ CLI -> LoopingMediaReader(PyAV) -> ordered media events (video/audio)
 
 Important design choices:
 
-- Audio and video are decoded from the same container timeline.
-- Audio is no longer reconstructed by slicing a full decoded buffer per video frame.
-- NDI sender clocks are disabled in the runtime path so that timing has one authority instead of two competing ones.
+- Audio and video use the same media timeline, with an explicit startup audio pre-roll for the AVP jitter buffer.
+- Audio is emitted in continuous 1024-sample blocks that cross loop boundaries; there are no short tail packets or floating-point loop rebases.
+- Exactly one NDI sender owns native audio clocking. Python does not pace the same PCM a second time.
 - Audio is decoded and sent on a dedicated thread so heavy video decode/overlay work cannot starve the receiver audio queue.
+- Seekable media loops reuse and flush persistent PyAV decoders. Reopening remains a compatibility fallback.
+- Diagnostics are queued and written asynchronously so filesystem flushes cannot stall the audio sender thread.
 - Late video frames are dropped before NDI send when needed to protect continuous audio; video never rebases independently from the shared A/V clock.
 - The 8K launcher sends packed UYVY 4:2:2 instead of BGRA, halving frame memory and avoiding NDI's BGRA color conversion.
-- Unity viewport ROI and gaze-marker drawing run directly on the packed UYVY buffer, without converting or copying the full 8K frame. The optional `--dual` square output remains BGRA-only.
+- ROI feedback is an explicit sender capability. With ROI enabled, Unity computes/sends viewport metadata and Python draws it directly on packed UYVY. With ROI disabled, Python does not start the backchannel and Unity automatically skips the viewport provider.
+- The 8K launcher defaults to ROI OFF for the clean performance path. `Stream_NDI_Default_8K_ROI.command` and its `.app` variant enable the complete feedback loop. The optional `--dual` square output remains BGRA-only.
 - The sender path is direct `libndi`, not `cyndilib`.
 
 ## Key Files
@@ -116,8 +119,11 @@ python3 stream_video.py Videos/big_buck_bunny.mp4
 python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
 python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
 python3 stream_video.py Videos/big_buck_bunny.mp4 --no-rx-metadata
+python3 stream_video.py Videos/big_buck_bunny.mp4 --no-roi-feedback
+python3 stream_video.py Videos/big_buck_bunny.mp4 --roi-feedback
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics --source-name StreamNDI-Test
+python3 stream_video.py Videos/big_buck_bunny.mp4 --audio-preroll-ms 2500
 # Optional diagnostic topology only:
 python3 stream_video.py Videos/big_buck_bunny.mp4 --source-name StreamNDI --audio-source-name StreamNDI_Audio
 ```
@@ -130,24 +136,83 @@ keeping both media types on one NDI source timeline.
 The 8K launcher also requests audio preloading. Eligibility is based on the decoded PCM
 memory estimate (256 MiB budget), rather than an arbitrary duration cutoff, so clips such
 as the 128-second Ghost Town test keep audio in RAM and remain isolated from video decode
-or storage stalls.
+or storage stalls. Preloading uses the project's PyAV decoder and does not require a
+separate `ffmpeg` executable.
 
 `--audio-source-name` remains available only for topology diagnostics. It publishes PCM
 on a separate NDI source and removes audio from the primary video source. Its NDI sender
 clock remains disabled because the audio worker already paces every PCM block against
 the application-owned media timeline.
 
-Convenience launchers also accept diagnostics through environment variables:
+The combined default source owns the native NDI audio clock. Python feeds it fixed
+1024-sample blocks and does not apply a second wall-clock wait. Video starts 2500 ms
+after audio by default so the AVP receiver can fill its jitter buffer before the first
+presented frame.
+
+The default 8K launcher enables asynchronous diagnostics unless
+`NDI_DIAGNOSTICS=0`; it also accepts explicit overrides:
 
 ```bash
 NDI_DIAGNOSTICS=1 Launchers/Stream_NDI_Default.command
 NDI_DIAGNOSTICS=1 NDI_SOURCE_NAME=StreamNDI-8K-Test Launchers/Stream_NDI_Default_8K.command
+NDI_AUDIO_PREROLL_MS=3000 Launchers/Stream_NDI_Default_8K.command
 ```
+
+8K ROI modes:
+
+- `Launchers/Apps/Stream NDI Default 8K.app`: ROI OFF (recommended performance baseline).
+- `Launchers/Apps/Stream NDI Default 8K ROI.app`: ROI ON.
+- `NDI_ROI_FEEDBACK=0|1` selects the same mode when invoking `Stream_NDI_Default_8K.command` directly.
+
+Every video frame advertises `<access_stream roi_feedback="0|1" />`. Compatible Unity receivers display this state and only evaluate/send viewport metadata when the source explicitly advertises ROI ON. `--no-roi-feedback` and the legacy `--no-rx-metadata` both disable the full ROI feedback path.
 
 Diagnostics are written to `Logs/ndi_diagnostics_*.jsonl` and mirrored as compact `[diag]`
 console summaries once per second.
 
 ## Runtime Diagnostics
+
+### AVP 8K transport baseline (2026-09-09)
+
+The 8K launchers and existing ROI-OFF/ROI-ON apps now default to
+`NDI_TRANSPORT=single-tcp`; `auto` remains available for controlled comparisons:
+
+```bash
+NDI_TRANSPORT=single-tcp Launchers/Stream_NDI_Ghost_Towns_8K24.command
+NDI_TRANSPORT=auto Launchers/Stream_NDI_Ghost_Towns_8K24.command
+```
+
+Single-TCP uses the repository's `Launchers/Config/SingleTCP/ndi-config.v1.json`
+through process-local `NDI_CONFIG_DIR`, set before runtime preflight. It disables
+RUDP, multi-TCP, unicast UDP and multicast sending so NDI falls back to base TCP.
+`auto` preserves normal SDK/user configuration, including an explicitly inherited
+`NDI_CONFIG_DIR`; unset that variable when comparing against SDK defaults. No
+machine-wide NDI preferences are modified. Invalid transport values fail before
+starting the sender. The JSONL `stream_start` records the requested policy and
+configuration directory; those fields do not prove the negotiated transport.
+
+The current AVP baseline passed 334.905 seconds after a clean scene re-entry:
+zero underruns, zero concealment and zero mixer deadline misses, with a
+2350.7–2500.0 ms reserve. The user confirmed continuous audible playback.
+The verified connection used the Mac's Ethernet interface. This is a bounded
+ROI-OFF test, not a long-session/ROI-ON sign-off or a universal networking
+recommendation. Verify
+actual sender sockets and interface during comparisons: the observed Mac has
+both Ethernet and Wi-Fi on the same LAN, and NDI changed interface after a scene
+reconnect. Keep the interface, clip, ROI setting and receiver prefill identical
+before attributing a difference solely to TCP/RUDP. The existing 8K apps share
+this launcher, so they do not require a new build-profile combination.
+
+The AVP mixer-filter run still starved despite zero native NDI dropped frames.
+That SDK counter covers frames not dequeued fast enough; it is not a complete
+end-to-end packet-loss counter. Compare received PCM duration against elapsed
+playout time and queue trend. A 10-second queue capacity is not a guaranteed
+10-second reserve. Exclude intentional restart and headset suspension from the
+measurement; re-enter the scene after suspension to remove stale queued audio
+until the receiver's pause/resume lifecycle is corrected.
+
+References: [NDI configuration](https://docs.ndi.video/all/developing-with-ndi/sdk/configuration-files),
+[configuration location](https://docs.ndi.video/all/developing-with-ndi/sdk/platform-considerations),
+[receiver counters](https://docs.ndi.video/all/developing-with-ndi/sdk/ndi-recv).
 
 Use diagnostics when audio clicks, pitch wobble, receiver dropouts, or video stalls appear.
 
@@ -156,6 +221,9 @@ Correlate these fields first:
 - `audio_late`, `audio_late_ms_max`: audio sender missed its playback deadline.
 - `audio_gap_count`, `audio_gap_ms_max`: decoded audio timeline has a gap.
 - `audio_send_ms_max`: NDI audio send call is taking too long.
+- `audio_short_blocks`: must stay at zero; every packet is exactly 1024 samples.
+- `audio_output_gaps` / `audio_output_bursts`: packet-cadence discontinuities seen after the NDI send call.
+- `audio_native_clock`: must be `true` for the normal combined ACCESS source.
 - `video_drops`: late video frames intentionally dropped to keep audio continuous.
 - `video_late_ms_max`: maximum lateness against the shared, non-rebased media clock.
 - `av_media_delta_ms`: latest audio media timestamp minus the video media timestamp; it should stay close to zero instead of growing over time.

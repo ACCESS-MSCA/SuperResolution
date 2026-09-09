@@ -5,21 +5,36 @@ SCRIPT_DIR="${0:A:h}"
 REPO_DIR="${SCRIPT_DIR:h}"
 VIDEO_PATH="${NDI_VIDEO_PATH:-Videos/big_buck_bunny_8k30.mp4}"
 VIDEO_PREFETCH_FRAMES="${NDI_VIDEO_PREFETCH_FRAMES:-4}"
+AUDIO_PREROLL_MS="${NDI_AUDIO_PREROLL_MS:-2500}"
+ROI_FEEDBACK="${NDI_ROI_FEEDBACK:-0}"
+# AVP baseline: 2026-09-09 TCP/Ethernet run sustained the PCM reserve with
+# zero underruns for 335 s. Keep auto available for controlled comparisons.
+export NDI_TRANSPORT="${NDI_TRANSPORT:-single-tcp}"
 EXTRA_ARGS=()
 
 EXTRA_ARGS+=(--video-prefetch-frames "$VIDEO_PREFETCH_FRAMES")
+EXTRA_ARGS+=(--audio-preroll-ms "$AUDIO_PREROLL_MS")
 
 if [[ "${NDI_PRELOAD_AUDIO:-1}" == "1" ]]; then
     EXTRA_ARGS+=(--preload-audio)
 fi
 
-if [[ "${NDI_DIAGNOSTICS:-0}" == "1" ]]; then
+if [[ "${NDI_DIAGNOSTICS:-1}" == "1" ]]; then
     EXTRA_ARGS+=(--diagnostics)
 fi
 
 if [[ -n "${NDI_SOURCE_NAME:-}" ]]; then
     EXTRA_ARGS+=(--source-name "$NDI_SOURCE_NAME")
 fi
+
+case "$ROI_FEEDBACK" in
+    0) EXTRA_ARGS+=(--no-roi-feedback) ;;
+    1) EXTRA_ARGS+=(--roi-feedback) ;;
+    *)
+        print -u2 -- "[NDI] ERROR: NDI_ROI_FEEDBACK debe ser 0 o 1."
+        exit 1
+        ;;
+esac
 
 cd "$REPO_DIR"
 
@@ -30,11 +45,18 @@ VIDEO_PATH="$(ndi_resolve_video "$REPO_DIR" "$VIDEO_PATH")" || {
     exit 1
 }
 
+ndi_prepare_transport "$REPO_DIR" || exit 1
 ndi_prepare_python "$REPO_DIR" || exit 1
 
-echo "[NDI] Starting 8K performance stream (UYVY, metadata RX enabled)..."
+echo "[NDI] Starting 8K performance stream (UYVY)..."
 echo "[NDI] Repo: $REPO_DIR"
 echo "[NDI] Video: $VIDEO_PATH"
 echo "[NDI] Video prefetch: $VIDEO_PREFETCH_FRAMES frames"
+echo "[NDI] Audio preroll: $AUDIO_PREROLL_MS ms"
+if [[ "$ROI_FEEDBACK" == "1" ]]; then
+    echo "[NDI] ROI feedback: ON"
+else
+    echo "[NDI] ROI feedback: OFF"
+fi
 
 "$NDI_PYTHON" ./stream_video.py "$VIDEO_PATH" --uyvy "${EXTRA_ARGS[@]}"

@@ -3,6 +3,32 @@
 # Shared bootstrap and preflight helpers for the clickable launchers.
 # This file is sourced, not launched directly.
 
+# Set before any libndi initialization, including the preflight subprocess.
+# In NDI's config, tcp means multi-TCP. Disabling all optional transports
+# selects base single-TCP. This is process-local, never a machine-wide edit.
+ndi_prepare_transport() {
+    local repo_dir="$1"
+    local transport="${NDI_TRANSPORT:-auto}"
+    export NDI_TRANSPORT="$transport"
+    case "$transport" in
+        auto)
+            print -- "[NDI] Transport: SDK/user configuration (auto)"
+            ;;
+        single-tcp)
+            export NDI_CONFIG_DIR="$repo_dir/Launchers/Config/SingleTCP"
+            if [[ ! -r "$NDI_CONFIG_DIR/ndi-config.v1.json" ]]; then
+                ndi_fail "Falta la configuración SingleTCP: $NDI_CONFIG_DIR"
+                return 1
+            fi
+            print -- "[NDI] Transport: single TCP (isolated sender configuration)"
+            ;;
+        *)
+            ndi_fail "NDI_TRANSPORT debe ser auto o single-tcp."
+            return 1
+            ;;
+    esac
+}
+
 ndi_fail() {
     print -u2 -- "[NDI] ERROR: $*"
     print -u2 -- "[NDI] Pulsa Enter para cerrar."

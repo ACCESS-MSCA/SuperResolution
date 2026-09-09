@@ -73,14 +73,23 @@ Launchers/Stream_NDI_Ghost_Towns_8K24.command
 
 El lanzador activa automáticamente UYVY, cuatro frames de prefetch, precarga de audio cuando es posible y diagnósticos.
 
+Desde la validación AVP del 09/09/2026, los lanzadores 8K usan por defecto
+NDI_TRANSPORT=single-tcp mediante una configuración local del proceso. En una
+prueba limpia de 334,905 s sobre Ethernet, el receptor mantuvo 2350,7–2500,0 ms
+de PCM sin underruns, concealment ni fallos DSP. NDI_TRANSPORT=auto permite
+comparar con la configuración del SDK. Este resultado es un baseline acotado:
+la reentrada en la escena también cambió el Mac de Wi‑Fi a Ethernet, por lo que
+TCP no queda aislado como causa única hasta repetir la prueba en la misma interfaz.
+
 ## 4. Qué se ha optimizado en el streaming
 
 ### Timeline y sincronía A/V
 
 - Se sustituyó el modelo anterior, que calculaba audio a partir del índice de frame, por un timeline único con PyAV.
 - Audio y vídeo conservan los tiempos del mismo contenedor.
-- `stream_video.py` mantiene un único reloj de reproducción.
-- Los clocks internos del sender NDI están desactivados en el camino recomendado para evitar dos autoridades de timing.
+- El audio se emite en bloques continuos de 1024 muestras que atraviesan el loop sin paquetes finales cortos ni rebases acumulativos.
+- Exactamente un sender —la fuente combinada recomendada— activa el reloj nativo de audio NDI. Python no vuelve a dormir ese mismo PCM con un segundo reloj.
+- El vídeo conserva su deadline dentro de la timeline común y arranca 2500 ms después del audio para permitir el prefill efectivo del receptor AVP.
 - El vídeo nunca reajusta su reloj de forma independiente: si llega tarde se descarta el frame vencido, protegiendo la continuidad del audio y evitando deriva permanente.
 - El padding de audio al final del clip se recorta respecto a la duración marcada por el vídeo para que el loop no acumule huecos.
 
@@ -89,6 +98,8 @@ El lanzador activa automáticamente UYVY, cuatro frames de prefetch, precarga de
 - Se reemplazó `cyndilib` como sender principal por llamadas directas a `libndi` mediante `ctypes`.
 - Esto elimina buffering y comportamiento implícito del wrapper y da control directo sobre frames, clocks y ciclo de vida del sender.
 - Audio y vídeo se publican, por defecto, en una sola fuente `StreamNDI`. La fuente de audio separada queda sólo como herramienta de diagnóstico.
+- El loop reutiliza y hace flush/seek de los decoders PyAV persistentes; reabrirlos queda como fallback de compatibilidad.
+- Los diagnósticos se escriben desde una cola asíncrona para que un flush de disco no bloquee el hilo emisor de audio.
 - La metadata de Unity sigue llegando por el backchannel NDI sin crear un transporte paralelo.
 
 ### Rendimiento específico de 8K
@@ -97,13 +108,16 @@ El lanzador activa automáticamente UYVY, cuatro frames de prefetch, precarga de
 - El envío de vídeo es asíncrono y se conserva el buffer hasta que NDI deja de utilizarlo.
 - El decode de vídeo dispone de una cola limitada de prefetch; el perfil actual usa cuatro frames. Esto absorbe variaciones breves del decode sin permitir crecimiento ilimitado de memoria.
 - Audio y vídeo se decodifican por rutas separadas. El audio se envía desde un hilo dedicado para que un frame 8K costoso no vacíe la cola de audio del receptor.
-- En modo UYVY, el ROI de viewport y el marcador de gaze se dibujan directamente sobre el buffer empaquetado 4:2:2, sin volver a BGRA ni copiar el frame 8K completo. El overlay de validación `--dual`/cuadrado sigue limitado a BGRA.
+- El launcher 8K principal arranca con ROI OFF: no inicia el backchannel ni dibuja overlays, y anuncia `roi_feedback="0"` para que Unity tampoco calcule ni envíe viewport/gaze.
+- La variante `Stream_NDI_Default_8K_ROI.command`/`.app` activa ROI ON. En ese modo, el ROI y el marcador de gaze se dibujan directamente sobre UYVY 4:2:2, sin volver a BGRA ni copiar el frame completo. El overlay `--dual`/cuadrado sigue limitado a BGRA.
 - Se añadieron recuperación de errores de decode y descarte controlado de frames de vídeo tardíos.
 
 ### Audio
 
 - La salida se normaliza a PCM `float32` planar, estéreo y `48 kHz`, que es el formato entregado a NDI.
-- El lanzador 8K solicita precargar el audio para aislarlo de bloqueos del disco o del decode de vídeo.
+- Se envían siempre bloques de 1024 muestras; `audio_short_blocks`, `audio_output_gaps` y `audio_output_bursts` deben permanecer a cero.
+- La fuente combinada debe reportar `audio_native_clock=true`; la fuente separada de diagnóstico mantiene ese clock desactivado.
+- El lanzador 8K solicita precargar el audio mediante PyAV para aislarlo de bloqueos del disco o del decode de vídeo, sin depender de un ejecutable `ffmpeg` externo.
 - La precarga se decide por memoria, no por una duración arbitraria: presupuesto máximo de `256 MiB` de PCM decodificado.
 - Ghost Towns necesita aproximadamente 47 MiB de PCM, por lo que entra holgadamente en ese presupuesto cuando FFmpeg está disponible.
 - Si la precarga no puede realizarse, existe un fallback de decode continuo con PyAV; funciona, pero la precarga sigue siendo preferible para una sesión 8K de producción.
@@ -124,14 +138,14 @@ El camino recomendado es:
 ```text
 WebM VP9/Opus 8K24
   -> PyAV: decode y timestamps del contenedor
-  -> prefetch de vídeo + hilo de audio dedicado
-  -> reloj único de la aplicación
+  -> prefetch de vídeo + PCM fijo de 1024 muestras en hilo dedicado
+  -> un único reloj nativo NDI para audio + preroll de 2500 ms
   -> UYVY 4:2:2
   -> libndi directo
   -> fuente NDI combinada StreamNDI
 ```
 
-La arquitectura ha sido validada en NDI Monitor, Unity Editor, Unity AVP Simulator y Apple Vision Pro. En la prueba reciente con Ghost Towns 8K no se observaron frames descartados, retrasos de audio ni errores del backchannel durante el arranque controlado. Para declarar un vídeo nuevo apto para producción sigue siendo necesaria una prueba larga en el hardware y la red finales.
+La arquitectura base fue validada en NDI Monitor, Unity Editor, Unity AVP Simulator y Apple Vision Pro. Una regresión posterior demostró que el sender y el receptor activos ya no coincidían con esa implementación: el sender perdió bloques fijos/clock nativo y Unity usaba un clip circular alimentado desde `Update`. Ambos núcleos históricos se restauraron el 8 de septiembre de 2026 conservando ROI ON/OFF y UYVY. La validación estática pasa, pero la versión restaurada necesita todavía una nueva prueba larga en AVP antes de volver a declararse estable.
 
 ## 6. Evolución resumida del proyecto
 
@@ -139,4 +153,5 @@ La arquitectura ha sido validada en NDI Monitor, Unity Editor, Unity AVP Simulat
 - **Mayo de 2026:** se incorporó el backchannel XML/NDI, el estado de usuario, gaze y viewport procedente de Unity.
 - **Junio de 2026:** se atacó la deriva de 1–2 segundos observada tras sesiones largas. El sender pasó de `cyndilib` a `libndi` directo y el decode A/V pasó a un timeline único con PyAV. Esta base se validó en NDI Monitor, Unity y Apple Vision Pro.
 - **Agosto de 2026:** se instrumentaron las sesiones 8K, se introdujeron UYVY, hilo de audio, descarte de vídeo tardío, recuperación de decode, prefetch limitado, precarga de audio, métricas JSONL y captura de logs de AVP.
-- **Fase final de agosto:** se mantuvieron audio y vídeo en una única fuente NDI, se amplió la precarga a un presupuesto real de memoria, se automatizó el entorno de los lanzadores, se detectó el NDI SDK instalado y se recuperó Ghost Towns mediante Git LFS.
+- **Fase final de agosto:** se mantuvieron audio y vídeo en una única fuente NDI, se añadieron bloques fijos, clock nativo único, preroll, loop persistente y diagnósticos asíncronos; el receptor pasó a cola SPSC de 10 s y callback DSP. Estas mejoras quedaron archivadas en snapshots, pero no correctamente fijadas en los repos propietarios.
+- **Septiembre de 2026:** se añadió ROI ON/OFF y dibujo directo UYVY. Tras detectar cortes reales en AVP, se reconstruyó la historia y se restauraron los núcleos estables de sender/receptor, preservando las mejoras ROI. Queda pendiente la validación larga final.

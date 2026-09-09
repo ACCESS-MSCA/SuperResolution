@@ -7,11 +7,11 @@
 	<key>CFBundleExecutable</key>
 	<string>launcher</string>
 	<key>CFBundleIdentifier</key>
-	<string>local.superresolution.stream-ndi-default-8k-no-roi</string>
+	<string>local.superresolution.stream-ndi-default-8k-roi</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Stream NDI Default 8K - No ROI</string>
+	<string>Stream NDI Default 8K - ROI</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 import math
+import time
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Optional
@@ -185,6 +185,10 @@ class LoopingMediaReader:
         self._pass_event_count = 0
 
         self.restart_count = 0
+        self.seek_restart_count = 0
+        self.reopen_restart_count = 0
+        self.restart_ms_max = 0.0
+        self.last_restart_ms = 0.0
         self.early_restart_count = 0
         self.video_decode_errors = 0
         self.audio_decode_errors = 0
@@ -310,6 +314,8 @@ class LoopingMediaReader:
         self._consecutive_video_decode_errors = 0
         self._consecutive_audio_decode_errors = 0
         self.restart_count += 1
+        if not first_pass:
+            self.reopen_restart_count += 1
 
         if not first_pass:
             return None
@@ -327,6 +333,39 @@ class LoopingMediaReader:
             video_pixel_format=self._video_pixel_format,
         )
 
+    def _seek_pass_to_start(self) -> None:
+        if self._decode_video:
+            if self._video_container is None or self._video_stream is None:
+                raise RuntimeError("Video decoder is unavailable for loop seek")
+            self._video_container.seek(0, backward=True, any_frame=False)
+            self._video_stream.codec_context.flush_buffers()
+            self._video_frames = iter(self._video_container.decode(video=0))
+
+        if self._decode_audio and self._audio_stream is not None:
+            if self._audio_container is None:
+                raise RuntimeError("Audio decoder is unavailable for loop seek")
+            self._audio_container.seek(0, backward=True, any_frame=False)
+            self._audio_stream.codec_context.flush_buffers()
+            self._audio_frames = iter(self._audio_container.decode(audio=0))
+            self._audio_resampler = AudioResampler(
+                format="fltp",
+                layout=_AUDIO_LAYOUT_BY_CHANNELS[self._audio_channels],
+                rate=self._audio_sample_rate,
+            )
+
+        self._audio_tail_flushed = False
+        self._pending_audio_events.clear()
+        self._next_video_event = None
+        self._next_audio_event = None
+        self._next_audio_time_seconds = 0.0
+        self._next_video_time_seconds = 0.0
+        self._pass_max_end_seconds = 0.0
+        self._pass_event_count = 0
+        self._consecutive_video_decode_errors = 0
+        self._consecutive_audio_decode_errors = 0
+        self.restart_count += 1
+        self.seek_restart_count += 1
+
     def _restart_after_eof(self) -> None:
         if self._pass_event_count <= 0:
             raise RuntimeError(f"No decodable media events found in '{self._video_path}'.")
@@ -339,7 +378,16 @@ class LoopingMediaReader:
             self.early_restart_count += 1
 
         self._pass_media_offset_seconds += pass_duration
-        self._open_pass(first_pass=False)
+        restart_started = time.monotonic()
+        try:
+            self._seek_pass_to_start()
+        except Exception as exc:
+            print(f"[warn] loop seek failed; reopening decoder: {exc}")
+            self._open_pass(first_pass=False)
+        finally:
+            restart_ms = (time.monotonic() - restart_started) * 1000.0
+            self.last_restart_ms = restart_ms
+            self.restart_ms_max = max(self.restart_ms_max, restart_ms)
 
     def _make_video_event(self, event_time: float, frame_data: np.ndarray) -> MediaVideoEvent:
         self._pass_event_count += 1

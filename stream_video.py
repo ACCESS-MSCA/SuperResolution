@@ -1,7 +1,6 @@
 """
 Stream a video file as an NDI source using direct libndi calls.
 Other apps on the network (OBS, NDI Monitor, etc.) can receive it.
-
 Usage:
     python stream_video.py
     python stream_video.py <path_to_video>
@@ -9,19 +8,22 @@ Usage:
     python stream_video.py <path_to_video> --rx-metadata-verbose
     python stream_video.py <path_to_video> --rx-metadata-log-all
     python stream_video.py <path_to_video> --no-rx-metadata
+    python stream_video.py <path_to_video> --roi-feedback
+    python stream_video.py <path_to_video> --no-roi-feedback
     python stream_video.py <path_to_video> --uyvy
     python stream_video.py <path_to_video> --diagnostics
     python stream_video.py <path_to_video> --diagnostics-file Logs/run.jsonl
     python stream_video.py <path_to_video> --source-name StreamNDI-Test
     python stream_video.py <path_to_video> --audio-source-name StreamNDI_Audio
     python stream_video.py <path_to_video> --video-prefetch-frames 4 --preload-audio
+    python stream_video.py <path_to_video> --audio-preroll-ms 2500
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue
-import subprocess
 import sys
 import threading
 import time
@@ -55,6 +57,89 @@ _AUDIO_PRELOAD_MAX_BYTES = 256 * 1024 * 1024
 _AUDIO_OUTPUT_SAMPLE_RATE = 48000
 _AUDIO_OUTPUT_CHANNELS = 2
 _AUDIO_OUTPUT_BYTES_PER_SAMPLE = np.dtype(np.float32).itemsize
+_AUDIO_BLOCK_SAMPLES = 1024
+_DEFAULT_AUDIO_PREROLL_MILLISECONDS = 2500.0
+
+
+class _FixedAudioBlockSource:
+    """Sample-accurate continuous PCM blocks across arbitrary media loops."""
+
+    def __init__(self, cached_pcm=None, reader=None, sample_rate: int = 48000, channels: int = 2):
+        if cached_pcm is None and reader is None:
+            raise ValueError("cached_pcm or reader is required")
+        self._sample_rate = int(sample_rate)
+        self._channels = int(channels)
+        self._cached_pcm = None
+        if cached_pcm is not None:
+            pcm = np.ascontiguousarray(cached_pcm, dtype=np.float32)
+            if pcm.ndim != 2 or pcm.shape[0] != self._channels or pcm.shape[1] <= 0:
+                raise ValueError("cached PCM must have shape (channels, samples)")
+            self._cached_pcm = pcm
+        self._reader = reader
+        self._pending_samples = None
+        self._pending_offset = 0
+        self._output = np.empty(
+            (self._channels, _AUDIO_BLOCK_SAMPLES),
+            dtype=np.float32,
+        )
+        self.sample_cursor = 0
+
+    @property
+    def loop_index(self) -> int:
+        if self._cached_pcm is None:
+            return int(getattr(self._reader, "restart_count", 1) - 1)
+        return self.sample_cursor // int(self._cached_pcm.shape[1])
+
+    def read(self) -> tuple[int, np.ndarray]:
+        block_start_sample = self.sample_cursor
+        if self._cached_pcm is not None:
+            self._fill_from_cached_pcm()
+        else:
+            self._fill_from_reader()
+        self.sample_cursor += _AUDIO_BLOCK_SAMPLES
+        return block_start_sample, self._output
+
+    def _fill_from_cached_pcm(self) -> None:
+        total_samples = int(self._cached_pcm.shape[1])
+        source_offset = self.sample_cursor % total_samples
+        output_offset = 0
+        while output_offset < _AUDIO_BLOCK_SAMPLES:
+            copy_count = min(
+                _AUDIO_BLOCK_SAMPLES - output_offset,
+                total_samples - source_offset,
+            )
+            self._output[
+                :, output_offset:output_offset + copy_count
+            ] = self._cached_pcm[:, source_offset:source_offset + copy_count]
+            output_offset += copy_count
+            source_offset = 0
+
+    def _fill_from_reader(self) -> None:
+        output_offset = 0
+        while output_offset < _AUDIO_BLOCK_SAMPLES:
+            if (
+                self._pending_samples is None
+                or self._pending_offset >= self._pending_samples.shape[1]
+            ):
+                event = self._reader.read_next()
+                samples = getattr(event, "samples", None)
+                if samples is None:
+                    continue
+                samples = np.ascontiguousarray(samples, dtype=np.float32)
+                if samples.ndim != 2 or samples.shape[0] != self._channels:
+                    raise ValueError(f"Unexpected streamed audio shape: {samples.shape}")
+                self._pending_samples = samples
+                self._pending_offset = 0
+
+            available = int(self._pending_samples.shape[1]) - self._pending_offset
+            copy_count = min(_AUDIO_BLOCK_SAMPLES - output_offset, available)
+            self._output[
+                :, output_offset:output_offset + copy_count
+            ] = self._pending_samples[
+                :, self._pending_offset:self._pending_offset + copy_count
+            ]
+            output_offset += copy_count
+            self._pending_offset += copy_count
 
 
 class _VideoPrefetcher:
@@ -117,11 +202,13 @@ class _VideoPrefetcher:
 class StreamDiagnostics:
     def __init__(self, enabled: bool, output_path: str | None = None) -> None:
         self.enabled = bool(enabled)
-        self._lock = threading.Lock()
         self._start = time.monotonic()
         self._next_summary = self._start + _DIAGNOSTIC_INTERVAL_SECONDS
         self.path: Path | None = None
         self._file = None
+        self._write_queue = None
+        self._writer_thread = None
+        self._dropped_records = 0
 
         if not self.enabled:
             return
@@ -133,13 +220,40 @@ class StreamDiagnostics:
             self.path = Path("Logs") / f"ndi_diagnostics_{stamp}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self.path.open("a", encoding="utf-8")
+        self._write_queue = queue.Queue(maxsize=8192)
+        self._writer_thread = threading.Thread(
+            target=self._run_writer,
+            name="NDI Diagnostics Writer",
+            daemon=True,
+        )
+        self._writer_thread.start()
         print(f"[diag] writing diagnostics to {self.path}")
 
     def close(self) -> None:
-        with self._lock:
+        if not self.enabled:
+            return
+        if self._write_queue is not None:
+            self._write_queue.put(None)
+        if self._writer_thread is not None:
+            self._writer_thread.join(timeout=3.0)
+        if self._file is not None:
+            self._file.flush()
+            self._file.close()
+            self._file = None
+
+    def _run_writer(self) -> None:
+        next_flush = time.monotonic() + 1.0
+        while True:
+            payload = self._write_queue.get()
+            if payload is None:
+                break
             if self._file is not None:
-                self._file.close()
-                self._file = None
+                line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+                self._file.write(line + "\n")
+                now = time.monotonic()
+                if now >= next_flush:
+                    self._file.flush()
+                    next_flush = now + 1.0
 
     def emit(self, event: str, **fields) -> None:
         if not self.enabled:
@@ -150,11 +264,10 @@ class StreamDiagnostics:
             "elapsed": round(time.monotonic() - self._start, 6),
             **fields,
         }
-        line = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        with self._lock:
-            if self._file is not None:
-                self._file.write(line + "\n")
-                self._file.flush()
+        try:
+            self._write_queue.put_nowait(payload)
+        except queue.Full:
+            self._dropped_records += 1
 
     def maybe_summary(self, **fields) -> None:
         if not self.enabled:
@@ -180,6 +293,11 @@ class StreamDiagnostics:
 
 def _configure_audio_frame(sender, sample_rate: int, channels: int, max_samples: int) -> None:
     sender.configure_audio(sample_rate, channels, max_samples)
+
+
+def _stream_capabilities_metadata(roi_feedback: bool) -> str:
+    enabled = "1" if roi_feedback else "0"
+    return f'<access_stream schema_version="1" roi_feedback="{enabled}" />'
 
 
 def _clamp01(value: float) -> float:
@@ -1007,49 +1125,58 @@ def _send_audio_event(sender_plain, sender_overlay, sender_audio, event) -> None
         sender_overlay.write_audio(event.samples)
 
 
-def _preload_audio_events_ffmpeg(video_path: str, loop_duration_seconds: float):
-    from media_reader import MediaAudioEvent
+def _preload_audio_pcm_pyav(video_path: str, loop_duration_seconds: float) -> np.ndarray:
+    """Decode one audio loop without requiring a system ffmpeg executable."""
+    from media_reader import LoopingMediaReader, MediaAudioEvent
 
-    result = subprocess.run(
-        [
-            "ffmpeg", "-v", "error", "-i", str(video_path),
-            "-vn", "-ac", "2", "-ar", "48000", "-f", "f32le", "pipe:1",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        error = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"FFmpeg audio preload failed: {error or result.returncode}")
-
-    interleaved = np.frombuffer(result.stdout, dtype="<f4")
-    usable_values = (interleaved.size // 2) * 2
-    if usable_values <= 0:
-        raise RuntimeError("FFmpeg audio preload produced no samples.")
-
-    planar = np.ascontiguousarray(
-        interleaved[:usable_values].reshape(-1, 2).T,
-        dtype=np.float32,
-    )
     expected_samples = max(1, int(round(loop_duration_seconds * 48000.0)))
-    if planar.shape[1] > expected_samples:
-        planar = planar[:, :expected_samples]
-    elif planar.shape[1] < expected_samples:
-        padded = np.zeros((2, expected_samples), dtype=np.float32)
-        padded[:, :planar.shape[1]] = planar
-        planar = padded
+    planar = np.zeros((2, expected_samples), dtype=np.float32)
+    written_end = 0
+    reader = LoopingMediaReader(
+        video_path,
+        audio_sample_rate=_AUDIO_OUTPUT_SAMPLE_RATE,
+        audio_channels=_AUDIO_OUTPUT_CHANNELS,
+        decode_video=False,
+        decode_audio=True,
+    )
 
-    events = []
-    for start in range(0, expected_samples, 1024):
-        end = min(expected_samples, start + 1024)
-        events.append(
-            MediaAudioEvent(
-                start / 48000.0,
-                np.ascontiguousarray(planar[:, start:end], dtype=np.float32),
+    try:
+        while written_end < expected_samples:
+            event = reader.read_next()
+            # read_next() restarts transparently at EOF. Only cache the first
+            # pass; the fixed-block source performs the later loops itself.
+            if reader.restart_count > 1:
+                break
+            if not isinstance(event, MediaAudioEvent):
+                continue
+
+            samples = np.ascontiguousarray(event.samples, dtype=np.float32)
+            if samples.ndim != 2 or samples.shape[0] != _AUDIO_OUTPUT_CHANNELS:
+                raise ValueError(f"Unexpected preloaded audio shape: {samples.shape}")
+
+            event_start = max(
+                0,
+                int(round(event.media_time_seconds * _AUDIO_OUTPUT_SAMPLE_RATE)),
             )
-        )
-    return events
+            source_offset = max(0, written_end - event_start)
+            destination_start = event_start + source_offset
+            if destination_start >= expected_samples or source_offset >= samples.shape[1]:
+                continue
+            copy_count = min(
+                samples.shape[1] - source_offset,
+                expected_samples - destination_start,
+            )
+            planar[
+                :, destination_start:destination_start + copy_count
+            ] = samples[:, source_offset:source_offset + copy_count]
+            written_end = max(written_end, destination_start + copy_count)
+    finally:
+        reader.close()
+
+    if written_end <= 0:
+        raise RuntimeError("PyAV audio preload produced no samples.")
+
+    return np.ascontiguousarray(planar, dtype=np.float32)
 
 
 def _wait_until_audio_deadline(
@@ -1099,37 +1226,33 @@ def _run_audio_sender(
     from media_reader import LoopingMediaReader, MediaAudioEvent
 
     reader = None
-    last_audio_media_time = None
     try:
-        cached_events = None
-        cached_event_index = 0
-        cached_loop_offset = 0.0
-        cached_loop_duration = loop_duration_seconds
+        cached_pcm = None
         if preload_audio:
             preload_started = time.monotonic()
             try:
-                cached_events = _preload_audio_events_ffmpeg(
+                cached_pcm = _preload_audio_pcm_pyav(
                     video_path,
-                    cached_loop_duration,
+                    loop_duration_seconds,
                 )
                 preload_ms = (time.monotonic() - preload_started) * 1000.0
                 diagnostics.emit(
                     "audio_preloaded",
-                    events=len(cached_events),
+                    samples=int(cached_pcm.shape[1]),
                     preload_ms=round(preload_ms, 3),
-                    duration=round(cached_loop_duration, 6),
-                    backend="ffmpeg",
+                    duration=round(loop_duration_seconds, 6),
+                    backend="pyav",
                 )
                 print(
-                    f"[info] audio preloaded: {len(cached_events)} events in "
-                    f"{preload_ms:.1f} ms (FFmpeg)"
+                    f"[info] audio preloaded: {cached_pcm.shape[1]} samples in "
+                    f"{preload_ms:.1f} ms (PyAV)"
                 )
             except Exception as exc:
-                cached_events = None
+                cached_pcm = None
                 diagnostics.emit("audio_preload_fallback", error=str(exc))
                 print(f"[warn] audio preload failed; using streaming fallback: {exc}")
 
-        if cached_events is None:
+        if cached_pcm is None:
             reader = LoopingMediaReader(
                 video_path,
                 audio_sample_rate=48000,
@@ -1138,6 +1261,18 @@ def _run_audio_sender(
                 decode_audio=True,
             )
 
+        block_source = _FixedAudioBlockSource(
+            cached_pcm=cached_pcm,
+            reader=reader,
+            sample_rate=_AUDIO_OUTPUT_SAMPLE_RATE,
+            channels=_AUDIO_OUTPUT_CHANNELS,
+        )
+        clocked_sender = sender_audio if sender_audio is not None else sender_plain
+        native_audio_clock = bool(
+            getattr(clocked_sender, "supports_native_audio_clock", False)
+            and getattr(clocked_sender, "clock_audio_enabled", False)
+        )
+        stats["native_clock"] = native_audio_clock
         worker_ready.set()
 
         while not stop_event.is_set():
@@ -1150,20 +1285,16 @@ def _run_audio_sender(
             playback_start_monotonic = clock_state["playback_start_monotonic"]
             first_media_time_seconds = clock_state["first_media_time_seconds"]
 
+        expected_interval_seconds = _AUDIO_BLOCK_SAMPLES / float(_AUDIO_OUTPUT_SAMPLE_RATE)
+        expected_interval_ns = int(
+            _AUDIO_BLOCK_SAMPLES * 1_000_000_000 // _AUDIO_OUTPUT_SAMPLE_RATE
+        )
+        last_send_completed_ns = None
+        consecutive_burst = 0
+
         while not stop_event.is_set():
             read_started = time.monotonic()
-            if cached_events is not None:
-                base_event = cached_events[cached_event_index]
-                event = MediaAudioEvent(
-                    cached_loop_offset + base_event.media_time_seconds,
-                    base_event.samples,
-                )
-                cached_event_index += 1
-                if cached_event_index >= len(cached_events):
-                    cached_event_index = 0
-                    cached_loop_offset += cached_loop_duration
-            else:
-                event = reader.read_next()
+            block_start_sample, samples = block_source.read()
             read_ms = (time.monotonic() - read_started) * 1000.0
             stats["read_ms_max"] = max(stats.get("read_ms_max", 0.0), read_ms)
             if read_ms > _DIAGNOSTIC_READ_WARN_SECONDS * 1000.0:
@@ -1171,56 +1302,88 @@ def _run_audio_sender(
                 diagnostics.emit(
                     "audio_reader_slow",
                     read_ms=round(read_ms, 3),
-                    media_time=round(getattr(event, "media_time_seconds", 0.0), 6),
+                    sample_cursor=block_start_sample,
                 )
-            if not isinstance(event, MediaAudioEvent):
-                continue
+            sample_count = int(samples.shape[1])
+            if sample_count != _AUDIO_BLOCK_SAMPLES:
+                stats["short_block_count"] = stats.get("short_block_count", 0) + 1
+                raise RuntimeError(
+                    f"Audio block invariant failed: {sample_count} != {_AUDIO_BLOCK_SAMPLES}"
+                )
 
-            sample_count = int(event.samples.shape[1])
-            duration_seconds = sample_count / 48000.0
-            if last_audio_media_time is not None:
-                media_gap = event.media_time_seconds - last_audio_media_time
-                expected_gap = duration_seconds
-                if media_gap - expected_gap > _DIAGNOSTIC_AUDIO_GAP_SECONDS:
-                    stats["media_gap_count"] = stats.get("media_gap_count", 0) + 1
-                    stats["media_gap_ms_max"] = max(
-                        stats.get("media_gap_ms_max", 0.0),
-                        (media_gap - expected_gap) * 1000.0,
-                    )
-                    diagnostics.emit(
-                        "audio_media_gap",
-                        media_gap_ms=round(media_gap * 1000.0, 3),
-                        expected_ms=round(expected_gap * 1000.0, 3),
-                        media_time=round(event.media_time_seconds, 6),
-                        samples=sample_count,
-                    )
-            last_audio_media_time = event.media_time_seconds
+            media_time_seconds = (
+                first_media_time_seconds
+                + block_start_sample / float(_AUDIO_OUTPUT_SAMPLE_RATE)
+            )
+            event = MediaAudioEvent(media_time_seconds, samples)
             stats["samples"] = stats.get("samples", 0) + sample_count
             stats["chunk_samples_max"] = max(stats.get("chunk_samples_max", 0), sample_count)
+            stats["loop_index"] = block_source.loop_index
 
-            if not _wait_until_audio_deadline(
-                playback_start_monotonic,
-                first_media_time_seconds,
-                event.media_time_seconds,
-                stop_event,
-                stats,
-            ):
-                break
+            if not native_audio_clock:
+                if not _wait_until_audio_deadline(
+                    playback_start_monotonic,
+                    first_media_time_seconds,
+                    media_time_seconds,
+                    stop_event,
+                    stats,
+                ):
+                    break
 
             send_started = time.monotonic()
             _send_audio_event(sender_plain, sender_overlay, sender_audio, event)
+            send_completed_ns = time.monotonic_ns()
             send_ms = (time.monotonic() - send_started) * 1000.0
             stats["send_ms_max"] = max(stats.get("send_ms_max", 0.0), send_ms)
-            if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
+            slow_send_threshold_ms = max(
+                _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0,
+                expected_interval_seconds * 2500.0 if native_audio_clock else 0.0,
+            )
+            if send_ms > slow_send_threshold_ms:
                 stats["send_slow_count"] = stats.get("send_slow_count", 0) + 1
                 diagnostics.emit(
                     "audio_send_slow",
                     send_ms=round(send_ms, 3),
-                    media_time=round(event.media_time_seconds, 6),
+                    media_time=round(media_time_seconds, 6),
                     samples=sample_count,
                 )
+
+            if last_send_completed_ns is not None:
+                interval_ns = send_completed_ns - last_send_completed_ns
+                interval_ms = interval_ns / 1_000_000.0
+                previous_min = stats.get("output_interval_ms_min", 0.0)
+                stats["output_interval_ms_min"] = (
+                    interval_ms if previous_min <= 0.0 else min(previous_min, interval_ms)
+                )
+                stats["output_interval_ms_max"] = max(
+                    stats.get("output_interval_ms_max", 0.0),
+                    interval_ms,
+                )
+                jitter_ms = abs(interval_ns - expected_interval_ns) / 1_000_000.0
+                stats["output_jitter_ms_max"] = max(
+                    stats.get("output_jitter_ms_max", 0.0),
+                    jitter_ms,
+                )
+                if interval_ns > expected_interval_ns * 3 // 2:
+                    stats["output_gap_count"] = stats.get("output_gap_count", 0) + 1
+                    stats["output_gap_ms_max"] = max(
+                        stats.get("output_gap_ms_max", 0.0),
+                        interval_ms,
+                    )
+                    consecutive_burst = 0
+                elif interval_ns < expected_interval_ns // 2:
+                    stats["output_burst_count"] = stats.get("output_burst_count", 0) + 1
+                    consecutive_burst += 1
+                    stats["output_burst_packets_max"] = max(
+                        stats.get("output_burst_packets_max", 0),
+                        consecutive_burst + 1,
+                    )
+                else:
+                    consecutive_burst = 0
+            last_send_completed_ns = send_completed_ns
             stats["events"] += 1
-            stats["last_sent_media_time"] = event.media_time_seconds
+            stats["last_sent_media_time"] = media_time_seconds
+            stats["sample_cursor"] = block_source.sample_cursor
 
     except Exception as exc:
         stats["error"] = exc
@@ -1244,6 +1407,7 @@ def stream_video(
     diagnostics_file: str | None = None,
     video_prefetch_frames: int = 0,
     preload_audio: bool = False,
+    audio_preroll_milliseconds: float = _DEFAULT_AUDIO_PREROLL_MILLISECONDS,
 ):
     # Initialize NDI before PyAV loads FFmpeg dylibs. This avoids the macOS
     # AVFoundation class collision becoming part of sender creation.
@@ -1292,6 +1456,8 @@ def stream_video(
     height = media_info.height
     fps = media_info.fps
     total_frames = media_info.total_video_frames
+    audio_enabled = media_info.audio_enabled
+    audio_preroll_milliseconds = max(0.0, float(audio_preroll_milliseconds))
     fps_float = float(fps)
     expected_video_interval = 1.0 / max(fps_float, 1.0)
     video_drop_late_threshold = max(
@@ -1311,13 +1477,17 @@ def stream_video(
         height,
         fps,
         video_pixel_format=media_info.video_pixel_format,
+        clock_audio=bool(audio_enabled and not audio_source_name),
     )
+    sender_plain.set_video_metadata(_stream_capabilities_metadata(rx_metadata))
     print(f"NDI name: '{source_name}'")
     print(f"Pixels  : {media_info.video_pixel_format.upper()}")
     diagnostics.emit(
         "stream_start",
         video_path=str(video_path),
         source_name=str(source_name),
+        transport_policy=os.environ.get("NDI_TRANSPORT", "auto"),
+        ndi_config_dir=os.environ.get("NDI_CONFIG_DIR", ""),
         width=width,
         height=height,
         fps_num=int(fps.numerator),
@@ -1337,10 +1507,12 @@ def stream_video(
             3,
         ),
         audio_source_name=audio_source_name,
+        roi_feedback=bool(rx_metadata),
+        audio_native_clock=bool(audio_enabled),
+        audio_preroll_ms=round(audio_preroll_milliseconds, 3),
         video_drop_late_ms=round(video_drop_late_threshold * 1000.0, 3),
     )
 
-    audio_enabled = media_info.audio_enabled
     sender_audio = None
     if audio_enabled:
         _configure_audio_frame(
@@ -1363,10 +1535,9 @@ def stream_video(
                 height,
                 fps,
                 video_pixel_format=media_info.video_pixel_format,
-                # The audio worker already waits on the shared media deadline.
-                # Enabling the NDI sender clock here would pace every chunk a
-                # second time, turning transient send stalls into audio bursts.
-                clock_audio=False,
+                # Exactly one sender clocks PCM. Overlay/diagnostic duplicates
+                # remain unclocked and are sent after this primary call.
+                clock_audio=True,
             )
             _configure_audio_frame(
                 sender_audio,
@@ -1379,7 +1550,9 @@ def stream_video(
         print("Audio   : disabled (source has no audio stream)")
 
     if rx_metadata:
-        print("Backchannel: enabled (receiver -> sender metadata)")
+        print("ROI feedback: ON (Unity viewport metadata + sender overlay)")
+    else:
+        print("ROI feedback: OFF (Unity is instructed not to compute/send viewport metadata)")
 
     if rx_metadata_log_all:
         print("[info] --rx-metadata-log-all is a legacy compatibility flag (no effect).")
@@ -1435,12 +1608,23 @@ def stream_video(
         "late_ms_max": 0.0,
         "samples": 0,
         "chunk_samples_max": 0,
+        "short_block_count": 0,
         "media_gap_count": 0,
         "media_gap_ms_max": 0.0,
         "send_ms_max": 0.0,
         "send_slow_count": 0,
         "read_ms_max": 0.0,
         "read_slow_count": 0,
+        "native_clock": False,
+        "sample_cursor": 0,
+        "loop_index": 0,
+        "output_interval_ms_min": 0.0,
+        "output_interval_ms_max": 0.0,
+        "output_jitter_ms_max": 0.0,
+        "output_gap_count": 0,
+        "output_gap_ms_max": 0.0,
+        "output_burst_count": 0,
+        "output_burst_packets_max": 0,
         "last_sent_media_time": None,
         "error": None,
     }
@@ -1523,6 +1707,11 @@ def stream_video(
 
         try:
             while True:
+                if audio_enabled and audio_stats["error"] is not None:
+                    raise RuntimeError(
+                        f"Audio sender thread failed: {audio_stats['error']}"
+                    )
+
                 if backchannel is not None and dispatcher is not None:
                     messages = backchannel.drain(max_messages=32)
                     if messages:
@@ -1551,13 +1740,24 @@ def stream_video(
                     break
 
                 if playback_start_monotonic is None or first_media_time_seconds is None:
-                    playback_start_monotonic = time.monotonic()
+                    audio_playback_start_monotonic = time.monotonic()
+                    playback_start_monotonic = (
+                        audio_playback_start_monotonic
+                        + (audio_preroll_milliseconds / 1000.0 if audio_enabled else 0.0)
+                    )
                     first_media_time_seconds = event.media_time_seconds
                     if audio_clock_ready is not None:
                         with audio_clock_lock:
-                            audio_clock_state["playback_start_monotonic"] = playback_start_monotonic
+                            audio_clock_state["playback_start_monotonic"] = (
+                                audio_playback_start_monotonic
+                            )
                             audio_clock_state["first_media_time_seconds"] = first_media_time_seconds
                         audio_clock_ready.set()
+                        diagnostics.emit(
+                            "audio_preroll_started",
+                            preroll_ms=round(audio_preroll_milliseconds, 3),
+                            first_media_time=round(first_media_time_seconds, 6),
+                        )
 
                 playback_start_monotonic, late_count = _wait_until_media_deadline(
                     playback_start_monotonic,
@@ -1660,6 +1860,9 @@ def stream_video(
                         video_send_slow=video_send_slow_count,
                         video_decode_errors=getattr(media_reader, "video_decode_errors", 0),
                         video_decode_recoveries=getattr(media_reader, "video_decode_recoveries", 0),
+                        video_loop_seek_restarts=getattr(media_reader, "seek_restart_count", 0),
+                        video_loop_reopens=getattr(media_reader, "reopen_restart_count", 0),
+                        video_loop_restart_ms_max=getattr(media_reader, "restart_ms_max", 0.0),
                         audio_events=audio_stats["events"],
                         audio_late=audio_stats["late_count"],
                         audio_late_ms_max=audio_stats["late_ms_max"],
@@ -1671,6 +1874,17 @@ def stream_video(
                         audio_send_slow=audio_stats["send_slow_count"],
                         audio_read_ms_max=audio_stats["read_ms_max"],
                         audio_read_slow=audio_stats["read_slow_count"],
+                        audio_native_clock=audio_stats["native_clock"],
+                        audio_short_blocks=audio_stats["short_block_count"],
+                        audio_sample_cursor=audio_stats["sample_cursor"],
+                        audio_loop_index=audio_stats["loop_index"],
+                        audio_interval_ms_min=audio_stats["output_interval_ms_min"],
+                        audio_interval_ms_max=audio_stats["output_interval_ms_max"],
+                        audio_jitter_ms_max=audio_stats["output_jitter_ms_max"],
+                        audio_output_gaps=audio_stats["output_gap_count"],
+                        audio_output_gap_ms_max=audio_stats["output_gap_ms_max"],
+                        audio_output_bursts=audio_stats["output_burst_count"],
+                        audio_burst_packets_max=audio_stats["output_burst_packets_max"],
                         audio_media_time=audio_stats["last_sent_media_time"],
                         av_media_delta_ms=(
                             None
@@ -1706,7 +1920,12 @@ def stream_video(
                     f"late={audio_stats['late_count']}, "
                     f"late_ms_max={audio_stats['late_ms_max']:.2f}, "
                     f"send_ms_max={audio_stats['send_ms_max']:.2f}, "
-                    f"gaps={audio_stats['media_gap_count']}"
+                    f"short_blocks={audio_stats['short_block_count']}, "
+                    f"output_gaps={audio_stats['output_gap_count']}, "
+                    f"output_bursts={audio_stats['output_burst_count']}, "
+                    f"interval_ms={audio_stats['output_interval_ms_min']:.2f}.."
+                    f"{audio_stats['output_interval_ms_max']:.2f}, "
+                    f"native_clock={audio_stats['native_clock']}"
                 )
                 print(f"[info] video drops to protect audio: {video_drop_count}")
                 if audio_stats["error"] is not None:
@@ -1741,21 +1960,30 @@ def stream_video(
                 audio_events=audio_stats["events"],
                 audio_late=audio_stats["late_count"],
                 audio_gap_count=audio_stats["media_gap_count"],
+                audio_short_blocks=audio_stats["short_block_count"],
+                audio_output_gaps=audio_stats["output_gap_count"],
+                audio_output_bursts=audio_stats["output_burst_count"],
+                audio_sample_cursor=audio_stats["sample_cursor"],
             )
             diagnostics.close()
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--roi-feedback" in args and "--no-roi-feedback" in args:
+        raise SystemExit("Use either --roi-feedback or --no-roi-feedback, not both.")
     dual = "--dual" in args
     rx_metadata_verbose = "--rx-metadata-verbose" in args
     rx_metadata_log_all = "--rx-metadata-log-all" in args
-    rx_metadata = "--no-rx-metadata" not in args
+    rx_metadata = "--no-rx-metadata" not in args and "--no-roi-feedback" not in args
+    if "--roi-feedback" in args:
+        rx_metadata = True
     video_pixel_format = "uyvy422" if "--uyvy" in args else "bgra"
     diagnostics_enabled = "--diagnostics" in args
     diagnostics_file = None
     video_prefetch_frames = 0
     preload_audio = "--preload-audio" in args
+    audio_preroll_milliseconds = _DEFAULT_AUDIO_PREROLL_MILLISECONDS
     source_name = "StreamNDI"
     audio_source_name = None
 
@@ -1766,6 +1994,14 @@ if __name__ == "__main__":
         except (IndexError, ValueError) as exc:
             raise SystemExit("--video-prefetch-frames requires a non-negative integer") from exc
         del args[prefetch_index:prefetch_index + 2]
+
+    if "--audio-preroll-ms" in args:
+        preroll_index = args.index("--audio-preroll-ms")
+        try:
+            audio_preroll_milliseconds = max(0.0, float(args[preroll_index + 1]))
+        except (IndexError, ValueError) as exc:
+            raise SystemExit("--audio-preroll-ms requires a non-negative number") from exc
+        del args[preroll_index:preroll_index + 2]
 
     if "--diagnostics-file" in args:
         diagnostics_file_index = args.index("--diagnostics-file")
@@ -1800,6 +2036,8 @@ if __name__ == "__main__":
             "--rx-metadata-verbose",
             "--rx-metadata-log-all",
             "--no-rx-metadata",
+            "--roi-feedback",
+            "--no-roi-feedback",
             "--uyvy",
             "--diagnostics",
             "--preload-audio",
@@ -1820,4 +2058,5 @@ if __name__ == "__main__":
         diagnostics_file=diagnostics_file,
         video_prefetch_frames=video_prefetch_frames,
         preload_audio=preload_audio,
+        audio_preroll_milliseconds=audio_preroll_milliseconds,
     )

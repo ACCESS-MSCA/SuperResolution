@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import atexit
 import ctypes
 import ctypes.util
@@ -220,11 +219,13 @@ class NativeNdiSender:
             clock_video=bool(clock_video),
             clock_audio=bool(clock_audio),
         )
+        self._clock_audio_enabled = bool(clock_audio)
         self._sender_ptr = ctypes.c_void_p()
         self._running = False
         self._video_send_lock = threading.Lock()
         self._audio_send_lock = threading.Lock()
         self._video_async_buffer = None
+        self._video_metadata_bytes: bytes | None = None
 
         pixel_format = str(video_pixel_format).lower()
         if pixel_format == "bgra":
@@ -261,6 +262,21 @@ class NativeNdiSender:
     @property
     def name(self) -> str:
         return self._ndi_name
+
+    def set_video_metadata(self, metadata: str | None) -> None:
+        """Attach stable XML metadata to every outgoing video frame."""
+        encoded = None if metadata is None else str(metadata).encode("utf-8")
+        with self._video_send_lock:
+            self._video_metadata_bytes = encoded
+            self._video_frame.p_metadata = encoded
+
+    @property
+    def supports_native_audio_clock(self) -> bool:
+        return True
+
+    @property
+    def clock_audio_enabled(self) -> bool:
+        return self._clock_audio_enabled
 
     def configure_audio(self, sample_rate: int, channels: int, max_samples: int = 0) -> None:
         del max_samples
