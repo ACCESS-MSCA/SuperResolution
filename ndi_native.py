@@ -225,6 +225,7 @@ class NativeNdiSender:
         self._video_send_lock = threading.Lock()
         self._audio_send_lock = threading.Lock()
         self._video_async_buffer = None
+        self._video_async_metadata = None
         self._video_metadata_bytes: bytes | None = None
 
         pixel_format = str(video_pixel_format).lower()
@@ -331,6 +332,7 @@ class NativeNdiSender:
                     pass
                 self._runtime.lib.NDIlib_send_destroy(ptr)
                 self._video_async_buffer = None
+                self._video_async_metadata = None
 
     def __enter__(self):
         self.open()
@@ -365,6 +367,9 @@ class NativeNdiSender:
                 ctypes.byref(self._video_frame),
             )
             self._video_async_buffer = frame_data
+            # Async ownership includes metadata, not only the pixel array.
+            # Retain the previous bytes until the next async send returns.
+            self._video_async_metadata = self._video_metadata_bytes
 
     def write_audio(self, data) -> None:
         if not self._running:
