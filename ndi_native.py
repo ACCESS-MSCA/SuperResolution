@@ -13,6 +13,8 @@ import numpy as np
 
 NDI_VIDEO_FOURCC_BGRA = 1095911234
 NDI_VIDEO_FOURCC_UYVY = 1498831189
+NDI_VIDEO_FOURCC_I420 = 808596553
+NDI_VIDEO_FOURCC_NV12 = 842094158
 NDI_AUDIO_FOURCC_FLTP = 1884572742
 NDI_FRAME_FORMAT_PROGRESSIVE = 1
 NDI_SEND_TIMECODE_SYNTHESIZE = 9223372036854775807
@@ -231,14 +233,30 @@ class NativeNdiSender:
         pixel_format = str(video_pixel_format).lower()
         if pixel_format == "bgra":
             video_fourcc = NDI_VIDEO_FOURCC_BGRA
-            video_bytes_per_pixel = 4
+            video_line_stride = int(width) * 4
+            video_expected_size = int(width) * int(height) * 4
         elif pixel_format == "uyvy422":
             video_fourcc = NDI_VIDEO_FOURCC_UYVY
-            video_bytes_per_pixel = 2
+            if int(width) % 2:
+                raise ValueError("UYVY video width must be divisible by two.")
+            video_line_stride = int(width) * 2
+            video_expected_size = int(width) * int(height) * 2
+        elif pixel_format == "i420":
+            if int(width) % 2 or int(height) % 2:
+                raise ValueError("I420 video width and height must be divisible by two.")
+            video_fourcc = NDI_VIDEO_FOURCC_I420
+            video_line_stride = int(width)
+            video_expected_size = int(width) * int(height) * 3 // 2
+        elif pixel_format == "nv12":
+            if int(width) % 2 or int(height) % 2:
+                raise ValueError("NV12 video width and height must be divisible by two.")
+            video_fourcc = NDI_VIDEO_FOURCC_NV12
+            video_line_stride = int(width)
+            video_expected_size = int(width) * int(height) * 3 // 2
         else:
             raise ValueError(f"Unsupported NDI video pixel format: '{video_pixel_format}'.")
         self._video_pixel_format = pixel_format
-        self._video_bytes_per_pixel = video_bytes_per_pixel
+        self._video_expected_size = video_expected_size
 
         self._video_frame = NDIlib_video_frame_v2_t(
             xres=int(width),
@@ -250,7 +268,7 @@ class NativeNdiSender:
             frame_format_type=NDI_FRAME_FORMAT_PROGRESSIVE,
             timecode=NDI_SEND_TIMECODE_SYNTHESIZE,
             p_data=None,
-            line_stride_in_bytes=int(width) * video_bytes_per_pixel,
+            line_stride_in_bytes=video_line_stride,
             p_metadata=None,
             timestamp=0,
         )
@@ -341,16 +359,12 @@ class NativeNdiSender:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def write_video(self, data) -> None:
+    def write_video(self, data, timecode: int | None = None) -> None:
         if not self._running:
             raise RuntimeError("Sender must be opened before writing video.")
 
         frame_data = np.ascontiguousarray(data, dtype=np.uint8)
-        expected_size = (
-            self._video_frame.xres
-            * self._video_frame.yres
-            * self._video_bytes_per_pixel
-        )
+        expected_size = self._video_expected_size
         if frame_data.size != expected_size:
             raise ValueError(
                 f"{self._video_pixel_format} video frame has an unexpected size: "
@@ -359,6 +373,9 @@ class NativeNdiSender:
             )
 
         with self._video_send_lock:
+            self._video_frame.timecode = (
+                NDI_SEND_TIMECODE_SYNTHESIZE if timecode is None else int(timecode)
+            )
             # NDI owns the previous async buffer until the next async call
             # returns. Keep that reference alive while handing it this frame.
             self._video_frame.p_data = frame_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
@@ -371,7 +388,7 @@ class NativeNdiSender:
             # Retain the previous bytes until the next async send returns.
             self._video_async_metadata = self._video_metadata_bytes
 
-    def write_audio(self, data) -> None:
+    def write_audio(self, data, timecode: int | None = None) -> None:
         if not self._running:
             raise RuntimeError("Sender must be opened before writing audio.")
         if self._audio_frame is None:
@@ -382,6 +399,9 @@ class NativeNdiSender:
             raise ValueError("Audio data must have shape (channels, samples).")
 
         with self._audio_send_lock:
+            self._audio_frame.timecode = (
+                NDI_SEND_TIMECODE_SYNTHESIZE if timecode is None else int(timecode)
+            )
             self._audio_frame.no_channels = int(audio_data.shape[0])
             self._audio_frame.no_samples = int(audio_data.shape[1])
             self._audio_frame.channel_stride_in_bytes = int(audio_data.shape[1]) * 4

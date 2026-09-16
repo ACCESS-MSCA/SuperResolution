@@ -11,12 +11,16 @@ Usage:
     python stream_video.py <path_to_video> --roi-feedback
     python stream_video.py <path_to_video> --no-roi-feedback
     python stream_video.py <path_to_video> --uyvy
+    python stream_video.py <path_to_video> --i420
+    python stream_video.py <path_to_video> --nv12
+    python stream_video.py <path_to_video> --auto-video-format
+    python stream_video.py <path_to_video> --video-hwaccel videotoolbox
     python stream_video.py <path_to_video> --diagnostics
     python stream_video.py <path_to_video> --diagnostics-file Logs/run.jsonl
     python stream_video.py <path_to_video> --source-name StreamNDI-Test
     python stream_video.py <path_to_video> --audio-source-name StreamNDI_Audio
     python stream_video.py <path_to_video> --video-prefetch-frames 4 --preload-audio
-    python stream_video.py <path_to_video> --audio-preroll-ms 2500
+    python stream_video.py <path_to_video> --audio-preroll-ms 0
 """
 
 from __future__ import annotations
@@ -39,8 +43,8 @@ from utils import draw_square, make_sender
 
 _ERP_ROI_MASK_CACHE: dict[tuple, np.ndarray] = {}
 _ROI_POLYGON_MASK_CACHE: dict[tuple, np.ndarray] = {}
-_ERP_ROI_UYVY_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
-_ROI_POLYGON_UYVY_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+_ERP_ROI_YUV_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
+_ROI_POLYGON_YUV_PIXEL_CACHE: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
 _GAZE_MARKER_RADIUS_PIXELS = 12
 _GAZE_MARKER_THICKNESS_PIXELS = 3
 _ERP_FRUSTUM_EDGE_SAMPLES = 96
@@ -53,12 +57,23 @@ _DIAGNOSTIC_VIDEO_GAP_FACTOR = 2.5
 _DIAGNOSTIC_AUDIO_GAP_SECONDS = 0.030
 _DIAGNOSTIC_SEND_WARN_SECONDS = 0.020
 _DIAGNOSTIC_READ_WARN_SECONDS = 0.050
+_DIAGNOSTIC_SLOW_EVENT_FIRST = 5
+_DIAGNOSTIC_SLOW_EVENT_INTERVAL = 120
 _AUDIO_PRELOAD_MAX_BYTES = 256 * 1024 * 1024
 _AUDIO_OUTPUT_SAMPLE_RATE = 48000
 _AUDIO_OUTPUT_CHANNELS = 2
 _AUDIO_OUTPUT_BYTES_PER_SAMPLE = np.dtype(np.float32).itemsize
 _AUDIO_BLOCK_SAMPLES = 1024
-_DEFAULT_AUDIO_PREROLL_MILLISECONDS = 2500.0
+_DEFAULT_AUDIO_PREROLL_MILLISECONDS = 0.0
+_AUDIO_VIDEO_LEAD_TOLERANCE_SECONDS = _AUDIO_BLOCK_SAMPLES / _AUDIO_OUTPUT_SAMPLE_RATE
+_NDI_TIMECODE_TICKS_PER_SECOND = 10_000_000
+_DIAGNOSTICS_SCHEMA_VERSION = 4
+
+
+def _should_emit_slow_event(count: int) -> bool:
+    return count <= _DIAGNOSTIC_SLOW_EVENT_FIRST or (
+        count % _DIAGNOSTIC_SLOW_EVENT_INTERVAL == 0
+    )
 
 
 class _FixedAudioBlockSource:
@@ -165,6 +180,15 @@ class _VideoPrefetcher:
 
     def start(self) -> None:
         self._thread.start()
+
+    def wait_until_ready(self, target_depth: int | None = None, timeout: float = 10.0) -> int:
+        target = self.capacity if target_depth is None else max(1, min(self.capacity, int(target_depth)))
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while self.depth < target and self._thread.is_alive():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+        return self.depth
 
     def close(self) -> None:
         self._stop_event.set()
@@ -278,6 +302,10 @@ class StreamDiagnostics:
             return
         self._next_summary = now + _DIAGNOSTIC_INTERVAL_SECONDS
         self.emit("summary", **fields)
+        def metric(name: str) -> str:
+            value = fields.get(name)
+            return "n/a" if value is None else f"{float(value):.1f}"
+
         print(
             "[diag] "
             f"t={fields.get('media_time', 0.0):.3f}s "
@@ -287,7 +315,11 @@ class StreamDiagnostics:
             f"audio_late={fields.get('audio_late', 0)} "
             f"video_gap_ms={fields.get('video_gap_ms_max', 0.0):.2f} "
             f"send_video_ms={fields.get('video_send_ms_max', 0.0):.2f} "
-            f"send_audio_ms={fields.get('audio_send_ms_max', 0.0):.2f}"
+            f"send_audio_ms={fields.get('audio_send_ms_max', 0.0):.2f} "
+            f"lead_ms={metric('av_content_lead_ms')} "
+            f"submit_drift_ms={metric('av_submission_drift_ms')} "
+            f"video_clock_lag_ms={metric('video_clock_lag_ms')} "
+            f"audio_clock_lag_ms={metric('audio_clock_lag_ms')}"
         )
 
 
@@ -756,6 +788,26 @@ def _uyvy_pair_view(frame_uyvy: np.ndarray) -> np.ndarray:
     return frame_uyvy.reshape(frame_uyvy.shape[0], frame_uyvy.shape[1] // 4, 4)
 
 
+def _nv12_plane_views(frame_nv12: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Expose packed NV12 as Y [h,w] and UV [h/2,w/2,2] views."""
+    if frame_nv12.dtype != np.uint8 or frame_nv12.ndim != 2:
+        raise ValueError("NV12 frame must be a two-dimensional uint8 array.")
+    packed_height, width = frame_nv12.shape
+    if (packed_height * 2) % 3 or width % 2:
+        raise ValueError("NV12 frame must contain even-sized Y and UV planes.")
+    height = packed_height * 2 // 3
+    if height % 2:
+        raise ValueError("NV12 frame height must be divisible by two.")
+    if not frame_nv12.flags.c_contiguous:
+        raise ValueError("NV12 frame must be C-contiguous.")
+    if not frame_nv12.flags.writeable:
+        raise ValueError("NV12 frame must be writeable for in-place overlay drawing.")
+    return (
+        frame_nv12[:height, :],
+        frame_nv12[height:, :].reshape(height // 2, width // 2, 2),
+    )
+
+
 def _empty_pixel_indices() -> tuple[np.ndarray, np.ndarray]:
     return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
@@ -827,6 +879,23 @@ def _apply_uyvy_pixels(
     pair_view[ys[~even], pair_x[~even], 3] = y
 
 
+def _apply_nv12_pixels(
+    y_plane: np.ndarray,
+    uv_view: np.ndarray,
+    ys: np.ndarray,
+    xs: np.ndarray,
+    color: tuple[int, int, int],
+) -> None:
+    if ys.size == 0:
+        return
+    u, y, v = color
+    y_plane[ys, xs] = y
+    uv_y = ys >> 1
+    uv_x = xs >> 1
+    uv_view[uv_y, uv_x, 0] = u
+    uv_view[uv_y, uv_x, 1] = v
+
+
 def _fill_uyvy_rect(
     pair_view: np.ndarray,
     x0: int,
@@ -858,26 +927,52 @@ def _fill_uyvy_rect(
     pair_view[y0:y1, first_odd_pair:last_odd_pair, 3] = y
 
 
-def _draw_equirectangular_frustum_roi_uyvy(
-    pair_view: np.ndarray,
+def _fill_nv12_rect(
+    y_plane: np.ndarray,
+    uv_view: np.ndarray,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    color: tuple[int, int, int],
+) -> None:
+    height, width = y_plane.shape
+    x0 = max(0, min(width, int(x0)))
+    x1 = max(0, min(width, int(x1)))
+    y0 = max(0, min(height, int(y0)))
+    y1 = max(0, min(height, int(y1)))
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    u, y, v = color
+    y_plane[y0:y1, x0:x1] = y
+    uv_x0 = x0 // 2
+    uv_x1 = (x1 + 1) // 2
+    uv_y0 = y0 // 2
+    uv_y1 = (y1 + 1) // 2
+    uv_view[uv_y0:uv_y1, uv_x0:uv_x1, 0] = u
+    uv_view[uv_y0:uv_y1, uv_x0:uv_x1, 1] = v
+
+
+def _equirectangular_frustum_roi_pixels(
+    width: int,
+    height: int,
     viewport: UnityViewportMetadata,
     thickness: int,
-    color: tuple[int, int, int],
-) -> bool:
-    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+) -> tuple[np.ndarray, np.ndarray]:
     if height < 2 or width < 2:
-        return False
+        return _empty_pixel_indices()
 
     t = max(1, int(thickness))
     corners = np.asarray(viewport.erp_corner_directions, dtype=np.float32)
     if corners.shape != (4, 3):
-        return False
+        return _empty_pixel_indices()
 
     normalized_corners: list[np.ndarray] = []
     for corner in corners:
         normalized = _normalize_vector(corner)
         if normalized is None:
-            return False
+            return _empty_pixel_indices()
         normalized_corners.append(normalized)
 
     corner_key = tuple(
@@ -885,7 +980,7 @@ def _draw_equirectangular_frustum_roi_uyvy(
         for corner in normalized_corners
     )
     cache_key = (width, height, t, _ERP_FRUSTUM_EDGE_SAMPLES, corner_key)
-    cached = _ERP_ROI_UYVY_PIXEL_CACHE.get(cache_key)
+    cached = _ERP_ROI_YUV_PIXEL_CACHE.get(cache_key)
     if cached is None:
         chunks: list[tuple[np.ndarray, np.ndarray]] = []
         samples = max(8, int(_ERP_FRUSTUM_EDGE_SAMPLES))
@@ -908,29 +1003,40 @@ def _draw_equirectangular_frustum_roi_uyvy(
                     _rasterize_polyline_pixels(width, height, pts, t, closed=False)
                 )
         cached = _combine_pixel_indices(chunks)
-        if cached[0].size == 0:
-            return False
-        _ERP_ROI_UYVY_PIXEL_CACHE.clear()
-        _ERP_ROI_UYVY_PIXEL_CACHE[cache_key] = cached
+        _ERP_ROI_YUV_PIXEL_CACHE.clear()
+        _ERP_ROI_YUV_PIXEL_CACHE[cache_key] = cached
+
+    return cached
+
+
+def _draw_equirectangular_frustum_roi_uyvy(
+    pair_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int,
+    color: tuple[int, int, int],
+) -> bool:
+    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+    cached = _equirectangular_frustum_roi_pixels(width, height, viewport, thickness)
+    if cached[0].size == 0:
+        return False
 
     _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
     return True
 
 
-def _draw_uv_polygon_roi_uyvy(
-    pair_view: np.ndarray,
+def _uv_polygon_roi_pixels(
+    width: int,
+    height: int,
     viewport: UnityViewportMetadata,
     thickness: int,
-    color: tuple[int, int, int],
     is_equirectangular: bool,
-) -> bool:
-    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+) -> tuple[np.ndarray, np.ndarray]:
     if height < 2 or width < 2:
-        return False
+        return _empty_pixel_indices()
 
     corners = list(viewport.uv_polygon)
     if len(corners) < 3:
-        return False
+        return _empty_pixel_indices()
 
     t = max(1, int(thickness))
     polygon_key = tuple((round(float(u), 6), round(float(v), 6)) for u, v in corners)
@@ -943,10 +1049,9 @@ def _draw_uv_polygon_roi_uyvy(
         viewport.contains_south_pole,
         polygon_key,
     )
-    cached = _ROI_POLYGON_UYVY_PIXEL_CACHE.get(cache_key)
+    cached = _ROI_POLYGON_YUV_PIXEL_CACHE.get(cache_key)
     if cached is not None:
-        _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
-        return True
+        return cached
 
     ordered = _unwrap_polygon_u(corners) if is_equirectangular else corners
     if is_equirectangular:
@@ -999,10 +1104,28 @@ def _draw_uv_polygon_roi_uyvy(
         chunks.append(_rasterize_polyline_pixels(width, height, pts, t, closed=True))
 
     cached = _combine_pixel_indices(chunks)
+    _ROI_POLYGON_YUV_PIXEL_CACHE.clear()
+    _ROI_POLYGON_YUV_PIXEL_CACHE[cache_key] = cached
+    return cached
+
+
+def _draw_uv_polygon_roi_uyvy(
+    pair_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int,
+    color: tuple[int, int, int],
+    is_equirectangular: bool,
+) -> bool:
+    height, width = pair_view.shape[0], pair_view.shape[1] * 2
+    cached = _uv_polygon_roi_pixels(
+        width,
+        height,
+        viewport,
+        thickness,
+        is_equirectangular,
+    )
     if cached[0].size == 0:
         return False
-    _ROI_POLYGON_UYVY_PIXEL_CACHE.clear()
-    _ROI_POLYGON_UYVY_PIXEL_CACHE[cache_key] = cached
     _apply_uyvy_pixels(pair_view, cached[0], cached[1], color)
     return True
 
@@ -1066,6 +1189,81 @@ def _draw_viewport_roi_uyvy(
     _draw_gaze_hit_marker_uyvy(pair_view, viewport)
 
 
+def _draw_gaze_hit_marker_nv12(
+    y_plane: np.ndarray,
+    uv_view: np.ndarray,
+    viewport: UnityViewportMetadata,
+) -> None:
+    if not viewport.gaze_hit:
+        return
+
+    u, v = viewport.gaze_uv
+    if not (np.isfinite(u) and np.isfinite(v)):
+        return
+    if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+        return
+
+    height, width = y_plane.shape
+    if height < 2 or width < 2:
+        return
+
+    x = int(round(u * (width - 1)))
+    y = int(round((1.0 - v) * (height - 1)))
+    radius = min(_GAZE_MARKER_RADIUS_PIXELS, max(2, min(width, height) // 8))
+    thickness = max(1, _GAZE_MARKER_THICKNESS_PIXELS)
+    shadow = _rgb_to_uyvy_bt709_limited(0, 0, 0)
+    yellow = _rgb_to_uyvy_bt709_limited(255, 255, 0)
+
+    def draw_cross(color: tuple[int, int, int], r: int, t: int) -> None:
+        half = max(0, t // 2)
+        _fill_nv12_rect(
+            y_plane, uv_view, x - r, y - half, x + r + 1, y + half + 1, color
+        )
+        _fill_nv12_rect(
+            y_plane, uv_view, x - half, y - r, x + half + 1, y + r + 1, color
+        )
+
+    draw_cross(shadow, radius + 1, thickness + 2)
+    draw_cross(yellow, radius, thickness)
+
+
+def _draw_viewport_roi_nv12(
+    frame_nv12: np.ndarray,
+    viewport: UnityViewportMetadata,
+    thickness: int = 4,
+) -> None:
+    """Draw viewport ROI directly into packed NV12 4:2:0 planes in-place."""
+    if not viewport.plane_intersection and not viewport.gaze_hit:
+        return
+
+    y_plane, uv_view = _nv12_plane_views(frame_nv12)
+    height, width = y_plane.shape
+    red = _rgb_to_uyvy_bt709_limited(255, 0, 0)
+    t = max(1, int(thickness))
+    is_equirectangular = viewport.uv_projection == "EquirectangularSphere"
+
+    if is_equirectangular and viewport.erp_frustum_valid:
+        pixels = _equirectangular_frustum_roi_pixels(width, height, viewport, t)
+        if pixels[0].size:
+            _apply_nv12_pixels(y_plane, uv_view, pixels[0], pixels[1], red)
+            _draw_gaze_hit_marker_nv12(y_plane, uv_view, viewport)
+            return
+
+    pixels = _uv_polygon_roi_pixels(
+        width,
+        height,
+        viewport,
+        t,
+        is_equirectangular,
+    )
+    if pixels[0].size:
+        _apply_nv12_pixels(y_plane, uv_view, pixels[0], pixels[1], red)
+        _draw_gaze_hit_marker_nv12(y_plane, uv_view, viewport)
+        return
+
+    _draw_gaze_hit_marker_nv12(y_plane, uv_view, viewport)
+
+
 def _wait_until_media_deadline(
     playback_start_monotonic: float,
     first_media_time_seconds: float,
@@ -1113,16 +1311,32 @@ def _deadline_lateness_seconds(
     return max(0.0, time.monotonic() - deadline)
 
 
-def _send_audio_event(sender_plain, sender_overlay, sender_audio, event) -> None:
+def _media_timecode(
+    origin_timecode: int,
+    first_media_time_seconds: float,
+    media_time_seconds: float,
+) -> int:
+    """Map the continuous media timeline to NDI's 100 ns timecode units."""
+    elapsed_seconds = float(media_time_seconds) - float(first_media_time_seconds)
+    return int(origin_timecode) + int(round(elapsed_seconds * _NDI_TIMECODE_TICKS_PER_SECOND))
+
+
+def _send_audio_event(
+    sender_plain,
+    sender_overlay,
+    sender_audio,
+    event,
+    timecode: int,
+) -> None:
     # A dedicated audio-only NDI source keeps the tiny PCM stream off the
     # high-bandwidth 8K receiver connection. When it is configured, do not
     # duplicate audio into the primary video source.
     if sender_audio is not None:
-        sender_audio.write_audio(event.samples)
+        sender_audio.write_audio(event.samples, timecode=timecode)
     else:
-        sender_plain.write_audio(event.samples)
+        sender_plain.write_audio(event.samples, timecode=timecode)
     if sender_overlay is not None:
-        sender_overlay.write_audio(event.samples)
+        sender_overlay.write_audio(event.samples, timecode=timecode)
 
 
 def _preload_audio_pcm_pyav(video_path: str, loop_duration_seconds: float) -> np.ndarray:
@@ -1208,6 +1422,90 @@ def _wait_until_audio_deadline(
     return True
 
 
+def _wait_for_audio_lead(
+    video_media_time_seconds: float,
+    target_lead_seconds: float,
+    stop_event: threading.Event,
+    stats: dict,
+) -> float:
+    """Hold video behind the PCM position actually accepted by libndi.
+
+    Audio is the only native-clocked stream in the performance sender.  Its
+    write call can occasionally block longer than one packet, so wall-clock
+    video pacing alone eventually consumes the initial preroll.  Returning the
+    wait duration lets the caller move the video clock by exactly the delay
+    imposed by the audio authority, without resetting either media timeline.
+    """
+    required_audio_end = (
+        float(video_media_time_seconds)
+        + max(0.0, float(target_lead_seconds))
+        - _AUDIO_VIDEO_LEAD_TOLERANCE_SECONDS
+    )
+    wait_started = time.monotonic()
+
+    while True:
+        error = stats.get("error")
+        if error is not None:
+            raise RuntimeError(f"Audio sender thread failed: {error}")
+
+        audio_media_end = stats.get("last_sent_media_end")
+        if audio_media_end is not None and audio_media_end >= required_audio_end:
+            return max(0.0, time.monotonic() - wait_started)
+
+        if stop_event.wait(0.002):
+            return max(0.0, time.monotonic() - wait_started)
+
+
+def _calculate_av_sync_metrics(
+    *,
+    video_send_completed_monotonic: float,
+    audio_send_completed_monotonic: float | None,
+    video_clock_origin_monotonic: float,
+    audio_clock_origin_monotonic: float,
+    first_media_time_seconds: float,
+    video_media_time_seconds: float,
+    audio_media_end_seconds: float | None,
+    target_audio_lead_seconds: float,
+) -> dict[str, float | None]:
+    """Separate media-position lead from sender submission-clock drift.
+
+    The media lead proves that the PCM cursor remains ahead of the video cursor.
+    Clock lag instead compares when each stream was actually accepted by libndi
+    against its original monotonic schedule. Their difference exposes drift at
+    the sender boundary without involving Unity or any receiver-side buffer.
+    """
+    if audio_media_end_seconds is None or audio_send_completed_monotonic is None:
+        return {
+            "av_content_lead_ms": None,
+            "av_content_lead_error_ms": None,
+            "video_clock_lag_ms": None,
+            "audio_clock_lag_ms": None,
+            "av_submission_drift_ms": None,
+        }
+
+    video_media_elapsed = video_media_time_seconds - first_media_time_seconds
+    audio_media_elapsed = audio_media_end_seconds - first_media_time_seconds
+    content_lead_seconds = audio_media_end_seconds - video_media_time_seconds
+    video_clock_lag_seconds = (
+        video_send_completed_monotonic - video_clock_origin_monotonic
+    ) - video_media_elapsed
+    audio_clock_lag_seconds = (
+        audio_send_completed_monotonic - audio_clock_origin_monotonic
+    ) - audio_media_elapsed
+
+    return {
+        "av_content_lead_ms": content_lead_seconds * 1000.0,
+        "av_content_lead_error_ms": (
+            content_lead_seconds - max(0.0, target_audio_lead_seconds)
+        ) * 1000.0,
+        "video_clock_lag_ms": video_clock_lag_seconds * 1000.0,
+        "audio_clock_lag_ms": audio_clock_lag_seconds * 1000.0,
+        "av_submission_drift_ms": (
+            video_clock_lag_seconds - audio_clock_lag_seconds
+        ) * 1000.0,
+    }
+
+
 def _run_audio_sender(
     video_path: str,
     sender_plain,
@@ -1284,6 +1582,7 @@ def _run_audio_sender(
         with clock_lock:
             playback_start_monotonic = clock_state["playback_start_monotonic"]
             first_media_time_seconds = clock_state["first_media_time_seconds"]
+            timecode_origin = clock_state["timecode_origin"]
 
         expected_interval_seconds = _AUDIO_BLOCK_SAMPLES / float(_AUDIO_OUTPUT_SAMPLE_RATE)
         expected_interval_ns = int(
@@ -1316,6 +1615,11 @@ def _run_audio_sender(
                 + block_start_sample / float(_AUDIO_OUTPUT_SAMPLE_RATE)
             )
             event = MediaAudioEvent(media_time_seconds, samples)
+            event_timecode = _media_timecode(
+                timecode_origin,
+                first_media_time_seconds,
+                media_time_seconds,
+            )
             stats["samples"] = stats.get("samples", 0) + sample_count
             stats["chunk_samples_max"] = max(stats.get("chunk_samples_max", 0), sample_count)
             stats["loop_index"] = block_source.loop_index
@@ -1331,7 +1635,13 @@ def _run_audio_sender(
                     break
 
             send_started = time.monotonic()
-            _send_audio_event(sender_plain, sender_overlay, sender_audio, event)
+            _send_audio_event(
+                sender_plain,
+                sender_overlay,
+                sender_audio,
+                event,
+                event_timecode,
+            )
             send_completed_ns = time.monotonic_ns()
             send_ms = (time.monotonic() - send_started) * 1000.0
             stats["send_ms_max"] = max(stats.get("send_ms_max", 0.0), send_ms)
@@ -1383,6 +1693,14 @@ def _run_audio_sender(
             last_send_completed_ns = send_completed_ns
             stats["events"] += 1
             stats["last_sent_media_time"] = media_time_seconds
+            stats["last_sent_media_end"] = (
+                media_time_seconds + sample_count / float(_AUDIO_OUTPUT_SAMPLE_RATE)
+            )
+            stats["last_send_completed_monotonic"] = send_completed_ns / 1_000_000_000.0
+            stats["last_send_snapshot"] = (
+                stats["last_sent_media_end"],
+                stats["last_send_completed_monotonic"],
+            )
             stats["sample_cursor"] = block_source.sample_cursor
 
     except Exception as exc:
@@ -1408,9 +1726,11 @@ def stream_video(
     video_prefetch_frames: int = 0,
     preload_audio: bool = False,
     audio_preroll_milliseconds: float = _DEFAULT_AUDIO_PREROLL_MILLISECONDS,
+    video_hwaccel: str | None = None,
 ):
-    # Initialize NDI before PyAV loads FFmpeg dylibs. This avoids the macOS
-    # AVFoundation class collision becoming part of sender creation.
+    # Initialize NDI before PyAV loads FFmpeg dylibs. The installed optional
+    # NDI HX camera plugin may still expose duplicate AVFoundation classes;
+    # launchers diagnose that host-level collision separately.
     get_ndi_runtime()
     from media_reader import LoopingMediaReader, MediaAudioEvent, MediaVideoEvent
 
@@ -1422,8 +1742,15 @@ def stream_video(
         decode_video=True,
         decode_audio=False,
         video_pixel_format=video_pixel_format,
+        video_hwaccel=video_hwaccel,
+        video_hwaccel_fallback=True,
     )
     media_info = media_reader.info
+
+    if rx_metadata and media_info.video_pixel_format == "i420":
+        raise ValueError(
+            "I420 is the ROI-OFF transmission path. Use UYVY when ROI feedback is enabled."
+        )
 
     preload_audio_requested = bool(preload_audio)
     audio_preload_duration_seconds = float(media_info.duration_seconds)
@@ -1467,6 +1794,16 @@ def stream_video(
 
     print(f"Source  : {video_path}")
     print(f"Size    : {width}x{height} @ {fps_float:.3f} fps ({total_frames} frames)")
+    print(
+        "Input   : "
+        f"{media_info.source_video_codec.upper()} / "
+        f"{media_info.source_video_pixel_format.upper()}"
+    )
+    print(
+        "Decode  : "
+        f"requested={media_reader.video_hwaccel_requested or 'software'} "
+        f"configured={media_reader.video_decode_backend}"
+    )
 
     if dual and media_info.video_pixel_format != "bgra":
         raise ValueError("The --dual overlay output requires BGRA video.")
@@ -1495,6 +1832,12 @@ def stream_video(
         fps=round(fps_float, 6),
         total_frames=total_frames,
         pixel_format=media_info.video_pixel_format,
+        source_video_codec=media_info.source_video_codec,
+        source_video_pixel_format=media_info.source_video_pixel_format,
+        video_decode_backend=media_reader.video_decode_backend,
+        video_hwaccel_requested=media_reader.video_hwaccel_requested,
+        hardware_decode_active=media_reader.hardware_decode_active,
+        hardware_decode_validated=False,
         video_prefetch_frames=max(0, int(video_prefetch_frames)),
         preload_audio=bool(preload_audio),
         preload_audio_requested=preload_audio_requested,
@@ -1509,6 +1852,11 @@ def stream_video(
         audio_source_name=audio_source_name,
         roi_feedback=bool(rx_metadata),
         audio_native_clock=bool(audio_enabled),
+        ndi_clock_video=False,
+        ndi_clock_audio=bool(audio_enabled),
+        ndi_timecode_mode="explicit-media-timeline",
+        diagnostics_schema_version=_DIAGNOSTICS_SCHEMA_VERSION,
+        media_duration_seconds=round(float(media_info.duration_seconds), 6),
         audio_preroll_ms=round(audio_preroll_milliseconds, 3),
         video_drop_late_ms=round(video_drop_late_threshold * 1000.0, 3),
     )
@@ -1548,6 +1896,7 @@ def stream_video(
             print(f"NDI audio: '{audio_source_name}' (dedicated audio-only source)")
     else:
         print("Audio   : disabled (source has no audio stream)")
+    print("Timecode: explicit shared media timeline (100 ns NDI ticks)")
 
     if rx_metadata:
         print("ROI feedback: ON (Unity viewport metadata + sender overlay)")
@@ -1580,12 +1929,19 @@ def stream_video(
 
     video_frame_idx = 0
     playback_start_monotonic = None
+    audio_playback_start_monotonic = None
+    video_clock_origin_monotonic = None
     first_media_time_seconds = None
     late_count = 0
     video_drop_count = 0
     video_sent_count = 0
     video_decode_read_ms_max = 0.0
     video_decode_slow_count = 0
+    video_decode_ms_max = 0.0
+    video_decode_stage_slow_count = 0
+    video_pack_ms_max = 0.0
+    video_pack_slow_count = 0
+    last_video_decode_backend = None
     video_prefetch_wait_ms_max = 0.0
     video_send_ms_max = 0.0
     video_send_slow_count = 0
@@ -1593,6 +1949,13 @@ def stream_video(
     video_gap_ms_max = 0.0
     video_gap_count = 0
     last_video_send_monotonic = None
+    last_sync_checkpoint_loop = -1
+    checkpoint_counters = {
+        "video_drops": 0,
+        "video_gaps": 0,
+        "sync_waits": 0,
+        "sync_wait_ms": 0.0,
+    }
     audio_thread = None
     audio_stop_event = None
     audio_worker_ready = None
@@ -1601,6 +1964,7 @@ def stream_video(
     audio_clock_state = {
         "playback_start_monotonic": None,
         "first_media_time_seconds": None,
+        "timecode_origin": None,
     }
     audio_stats = {
         "events": 0,
@@ -1626,6 +1990,12 @@ def stream_video(
         "output_burst_count": 0,
         "output_burst_packets_max": 0,
         "last_sent_media_time": None,
+        "last_sent_media_end": None,
+        "last_send_completed_monotonic": None,
+        "last_send_snapshot": (None, None),
+        "video_sync_wait_count": 0,
+        "video_sync_wait_ms_total": 0.0,
+        "video_sync_wait_ms_max": 0.0,
         "error": None,
     }
 
@@ -1703,7 +2073,19 @@ def stream_video(
         if video_prefetch_frames > 0:
             video_prefetcher = _VideoPrefetcher(media_reader, video_prefetch_frames)
             video_prefetcher.start()
-            print(f"[info] video prefetch enabled: {video_prefetcher.capacity} frames")
+            prefetch_ready_depth = video_prefetcher.wait_until_ready(
+                timeout=30.0 if video_hwaccel else 10.0,
+            )
+            print(
+                f"[info] video prefetch enabled: {video_prefetcher.capacity} frames "
+                f"(startup depth={prefetch_ready_depth})"
+            )
+            diagnostics.emit(
+                "video_prefetch_ready",
+                depth=prefetch_ready_depth,
+                capacity=video_prefetcher.capacity,
+                fully_ready=prefetch_ready_depth >= video_prefetcher.capacity,
+            )
 
         try:
             while True:
@@ -1730,21 +2112,24 @@ def stream_video(
                 video_decode_read_ms_max = max(video_decode_read_ms_max, read_ms)
                 if read_ms > _DIAGNOSTIC_READ_WARN_SECONDS * 1000.0:
                     video_decode_slow_count += 1
-                    diagnostics.emit(
-                        "video_reader_slow",
-                        read_ms=round(read_ms, 3),
-                        media_time=round(getattr(event, "media_time_seconds", 0.0), 6),
-                    )
+                    if _should_emit_slow_event(video_decode_slow_count):
+                        diagnostics.emit(
+                            "video_reader_slow",
+                            read_ms=round(read_ms, 3),
+                            media_time=round(getattr(event, "media_time_seconds", 0.0), 6),
+                        )
                 if event is None:
                     print("Error: failed to decode media event.")
                     break
 
                 if playback_start_monotonic is None or first_media_time_seconds is None:
                     audio_playback_start_monotonic = time.monotonic()
+                    timecode_origin = time.time_ns() // 100
                     playback_start_monotonic = (
                         audio_playback_start_monotonic
                         + (audio_preroll_milliseconds / 1000.0 if audio_enabled else 0.0)
                     )
+                    video_clock_origin_monotonic = playback_start_monotonic
                     first_media_time_seconds = event.media_time_seconds
                     if audio_clock_ready is not None:
                         with audio_clock_lock:
@@ -1752,6 +2137,7 @@ def stream_video(
                                 audio_playback_start_monotonic
                             )
                             audio_clock_state["first_media_time_seconds"] = first_media_time_seconds
+                            audio_clock_state["timecode_origin"] = timecode_origin
                         audio_clock_ready.set()
                         diagnostics.emit(
                             "audio_preroll_started",
@@ -1767,6 +2153,67 @@ def stream_video(
                 )
 
                 if isinstance(event, MediaVideoEvent):
+                    if event.decode_backend != last_video_decode_backend:
+                        last_video_decode_backend = event.decode_backend
+                        hardware_decode_active = event.decode_backend.startswith(
+                            "pyav-videotoolbox"
+                        )
+                        print(
+                            "[info] video decode path: "
+                            f"{event.decode_backend} "
+                            f"(hardware_active={int(hardware_decode_active)})"
+                        )
+                        diagnostics.emit(
+                            "video_decode_path",
+                            backend=event.decode_backend,
+                            hardware_decode_active=hardware_decode_active,
+                            hardware_decode_validated=True,
+                            fallback_count=media_reader.video_hwaccel_fallback_count,
+                        )
+                    video_decode_ms_max = max(video_decode_ms_max, event.decode_ms)
+                    if event.decode_ms > _DIAGNOSTIC_READ_WARN_SECONDS * 1000.0:
+                        video_decode_stage_slow_count += 1
+                        if _should_emit_slow_event(video_decode_stage_slow_count):
+                            diagnostics.emit(
+                                "video_decode_slow",
+                                decode_ms=round(event.decode_ms, 3),
+                                source_pixel_format=event.source_pixel_format,
+                                media_time=round(event.media_time_seconds, 6),
+                            )
+                    video_pack_ms_max = max(video_pack_ms_max, event.pack_ms)
+                    if event.pack_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
+                        video_pack_slow_count += 1
+                        if _should_emit_slow_event(video_pack_slow_count):
+                            diagnostics.emit(
+                                "video_pack_slow",
+                                pack_ms=round(event.pack_ms, 3),
+                                source_pixel_format=event.source_pixel_format,
+                                output_pixel_format=media_info.video_pixel_format,
+                                media_time=round(event.media_time_seconds, 6),
+                            )
+                    event_timecode = _media_timecode(
+                        timecode_origin,
+                        first_media_time_seconds,
+                        event.media_time_seconds,
+                    )
+                    if audio_enabled and audio_stop_event is not None:
+                        sync_wait_seconds = _wait_for_audio_lead(
+                            event.media_time_seconds,
+                            audio_preroll_milliseconds / 1000.0,
+                            audio_stop_event,
+                            audio_stats,
+                        )
+                        if sync_wait_seconds > 0.001:
+                            # Keep future video deadlines on the same clock as
+                            # the PCM actually accepted by the NDI runtime.
+                            playback_start_monotonic += sync_wait_seconds
+                            audio_stats["video_sync_wait_count"] += 1
+                            audio_stats["video_sync_wait_ms_total"] += sync_wait_seconds * 1000.0
+                            audio_stats["video_sync_wait_ms_max"] = max(
+                                audio_stats["video_sync_wait_ms_max"],
+                                sync_wait_seconds * 1000.0,
+                            )
+
                     video_late_seconds = _deadline_lateness_seconds(
                         playback_start_monotonic,
                         first_media_time_seconds,
@@ -1807,26 +2254,36 @@ def stream_video(
                                     frame_data,
                                     viewport_handler.state.latest,
                                 )
+                            elif media_info.video_pixel_format == "nv12":
+                                if not frame_data.flags.c_contiguous or not frame_data.flags.writeable:
+                                    frame_data = np.ascontiguousarray(frame_data)
+                                    if not frame_data.flags.writeable:
+                                        frame_data = np.array(frame_data, copy=True)
+                                _draw_viewport_roi_nv12(
+                                    frame_data,
+                                    viewport_handler.state.latest,
+                                )
 
                     plain_frame = frame_data.ravel()
                     send_started = time.monotonic()
-                    sender_plain.write_video(plain_frame)
+                    sender_plain.write_video(plain_frame, timecode=event_timecode)
                     send_ms = (time.monotonic() - send_started) * 1000.0
                     video_send_ms_max = max(video_send_ms_max, send_ms)
                     if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
                         video_send_slow_count += 1
-                        diagnostics.emit(
-                            "video_send_slow",
-                            send_ms=round(send_ms, 3),
-                            media_time=round(event.media_time_seconds, 6),
-                            frame=video_frame_idx,
-                        )
+                        if _should_emit_slow_event(video_send_slow_count):
+                            diagnostics.emit(
+                                "video_send_slow",
+                                send_ms=round(send_ms, 3),
+                                media_time=round(event.media_time_seconds, 6),
+                                frame=video_frame_idx,
+                            )
 
                     if sender_overlay is not None:
                         bgra_sq = np.array(frame_data, copy=True)
                         draw_square(bgra_sq, video_frame_idx)
                         overlay_frame = bgra_sq.ravel()
-                        sender_overlay.write_video(overlay_frame)
+                        sender_overlay.write_video(overlay_frame, timecode=event_timecode)
 
                     now = time.monotonic()
                     if last_video_send_monotonic is not None:
@@ -1844,6 +2301,85 @@ def stream_video(
                     last_video_send_monotonic = now
                     video_sent_count += 1
                     video_frame_idx += 1
+                    audio_media_end_snapshot, audio_send_completed_snapshot = audio_stats[
+                        "last_send_snapshot"
+                    ]
+                    sync_metrics = _calculate_av_sync_metrics(
+                        video_send_completed_monotonic=now,
+                        audio_send_completed_monotonic=audio_send_completed_snapshot,
+                        video_clock_origin_monotonic=video_clock_origin_monotonic,
+                        audio_clock_origin_monotonic=audio_playback_start_monotonic,
+                        first_media_time_seconds=first_media_time_seconds,
+                        video_media_time_seconds=event.media_time_seconds,
+                        audio_media_end_seconds=audio_media_end_snapshot,
+                        target_audio_lead_seconds=audio_preroll_milliseconds / 1000.0,
+                    )
+
+                    duration_seconds = float(media_info.duration_seconds)
+                    if duration_seconds > 0.0:
+                        video_loop_index = max(
+                            0,
+                            int(
+                                (event.media_time_seconds - first_media_time_seconds)
+                                / duration_seconds
+                            ),
+                        )
+                        if video_loop_index > last_sync_checkpoint_loop:
+                            checkpoint = {
+                                "loop_index": video_loop_index,
+                                "video_media_time": round(event.media_time_seconds, 6),
+                                "audio_media_end": (
+                                    None
+                                    if audio_media_end_snapshot is None
+                                    else round(audio_media_end_snapshot, 6)
+                                ),
+                                "video_drops_total": video_drop_count,
+                                "video_drops_loop": (
+                                    video_drop_count - checkpoint_counters["video_drops"]
+                                ),
+                                "video_gaps_total": video_gap_count,
+                                "video_gaps_loop": (
+                                    video_gap_count - checkpoint_counters["video_gaps"]
+                                ),
+                                "sync_waits_total": audio_stats["video_sync_wait_count"],
+                                "sync_waits_loop": (
+                                    audio_stats["video_sync_wait_count"]
+                                    - checkpoint_counters["sync_waits"]
+                                ),
+                                "sync_wait_ms_total": round(
+                                    audio_stats["video_sync_wait_ms_total"], 3
+                                ),
+                                "sync_wait_ms_loop": round(
+                                    audio_stats["video_sync_wait_ms_total"]
+                                    - checkpoint_counters["sync_wait_ms"],
+                                    3,
+                                ),
+                                **{
+                                    name: None if value is None else round(value, 3)
+                                    for name, value in sync_metrics.items()
+                                },
+                            }
+                            diagnostics.emit("av_sync_checkpoint", **checkpoint)
+                            print(
+                                "[sync] "
+                                f"loop={video_loop_index} "
+                                f"lead_ms={checkpoint['av_content_lead_ms']} "
+                                f"submit_drift_ms={checkpoint['av_submission_drift_ms']} "
+                                f"video_clock_lag_ms={checkpoint['video_clock_lag_ms']} "
+                                f"audio_clock_lag_ms={checkpoint['audio_clock_lag_ms']} "
+                                f"drops={checkpoint['video_drops_loop']} "
+                                f"wait_ms={checkpoint['sync_wait_ms_loop']}"
+                            )
+                            last_sync_checkpoint_loop = video_loop_index
+                            checkpoint_counters["video_drops"] = video_drop_count
+                            checkpoint_counters["video_gaps"] = video_gap_count
+                            checkpoint_counters["sync_waits"] = audio_stats[
+                                "video_sync_wait_count"
+                            ]
+                            checkpoint_counters["sync_wait_ms"] = audio_stats[
+                                "video_sync_wait_ms_total"
+                            ]
+
                     diagnostics.maybe_summary(
                         media_time=event.media_time_seconds,
                         video_sent=video_sent_count,
@@ -1854,6 +2390,15 @@ def stream_video(
                         video_gap_ms_max=video_gap_ms_max,
                         video_read_ms_max=video_decode_read_ms_max,
                         video_read_slow=video_decode_slow_count,
+                        video_decode_ms_max=video_decode_ms_max,
+                        video_decode_slow=video_decode_stage_slow_count,
+                        video_pack_ms_max=video_pack_ms_max,
+                        video_pack_slow=video_pack_slow_count,
+                        video_decode_backend=event.decode_backend,
+                        hardware_decode_active=event.decode_backend.startswith(
+                            "pyav-videotoolbox"
+                        ),
+                        video_hwaccel_fallbacks=media_reader.video_hwaccel_fallback_count,
                         video_prefetch_depth=(video_prefetcher.depth if video_prefetcher else 0),
                         video_prefetch_wait_ms_max=video_prefetch_wait_ms_max,
                         video_send_ms_max=video_send_ms_max,
@@ -1886,20 +2431,39 @@ def stream_video(
                         audio_output_bursts=audio_stats["output_burst_count"],
                         audio_burst_packets_max=audio_stats["output_burst_packets_max"],
                         audio_media_time=audio_stats["last_sent_media_time"],
+                        audio_media_end=audio_stats["last_sent_media_end"],
+                        video_audio_sync_waits=audio_stats["video_sync_wait_count"],
+                        video_audio_sync_wait_ms_total=round(
+                            audio_stats["video_sync_wait_ms_total"], 3
+                        ),
+                        video_audio_sync_wait_ms_max=round(
+                            audio_stats["video_sync_wait_ms_max"], 3
+                        ),
                         av_media_delta_ms=(
                             None
-                            if audio_stats["last_sent_media_time"] is None
-                            else round(
-                                (audio_stats["last_sent_media_time"] - event.media_time_seconds)
-                                * 1000.0,
-                                3,
-                            )
+                            if sync_metrics["av_content_lead_ms"] is None
+                            else round(sync_metrics["av_content_lead_ms"], 3)
                         ),
+                        **{
+                            name: None if value is None else round(value, 3)
+                            for name, value in sync_metrics.items()
+                        },
                     )
                     continue
 
                 if isinstance(event, MediaAudioEvent):
-                    _send_audio_event(sender_plain, sender_overlay, sender_audio, event)
+                    event_timecode = _media_timecode(
+                        timecode_origin,
+                        first_media_time_seconds,
+                        event.media_time_seconds,
+                    )
+                    _send_audio_event(
+                        sender_plain,
+                        sender_overlay,
+                        sender_audio,
+                        event,
+                        event_timecode,
+                    )
                     continue
 
         except KeyboardInterrupt:
@@ -1926,6 +2490,12 @@ def stream_video(
                     f"interval_ms={audio_stats['output_interval_ms_min']:.2f}.."
                     f"{audio_stats['output_interval_ms_max']:.2f}, "
                     f"native_clock={audio_stats['native_clock']}"
+                )
+                print(
+                    "[info] video/audio clock waits: "
+                    f"count={audio_stats['video_sync_wait_count']}, "
+                    f"total_ms={audio_stats['video_sync_wait_ms_total']:.2f}, "
+                    f"max_ms={audio_stats['video_sync_wait_ms_max']:.2f}"
                 )
                 print(f"[info] video drops to protect audio: {video_drop_count}")
                 if audio_stats["error"] is not None:
@@ -1957,6 +2527,17 @@ def stream_video(
                 video_drops=video_drop_count,
                 video_gap_count=video_gap_count,
                 video_gap_ms_max=round(video_gap_ms_max, 3),
+                video_read_ms_max=round(video_decode_read_ms_max, 3),
+                video_read_slow=video_decode_slow_count,
+                video_decode_ms_max=round(video_decode_ms_max, 3),
+                video_decode_slow=video_decode_stage_slow_count,
+                video_pack_ms_max=round(video_pack_ms_max, 3),
+                video_pack_slow=video_pack_slow_count,
+                video_send_ms_max=round(video_send_ms_max, 3),
+                video_send_slow=video_send_slow_count,
+                video_decode_backend=media_reader.video_decode_backend,
+                hardware_decode_active=media_reader.hardware_decode_active,
+                video_hwaccel_fallbacks=media_reader.video_hwaccel_fallback_count,
                 audio_events=audio_stats["events"],
                 audio_late=audio_stats["late_count"],
                 audio_gap_count=audio_stats["media_gap_count"],
@@ -1964,6 +2545,13 @@ def stream_video(
                 audio_output_gaps=audio_stats["output_gap_count"],
                 audio_output_bursts=audio_stats["output_burst_count"],
                 audio_sample_cursor=audio_stats["sample_cursor"],
+                video_audio_sync_waits=audio_stats["video_sync_wait_count"],
+                video_audio_sync_wait_ms_total=round(
+                    audio_stats["video_sync_wait_ms_total"], 3
+                ),
+                video_audio_sync_wait_ms_max=round(
+                    audio_stats["video_sync_wait_ms_max"], 3
+                ),
             )
             diagnostics.close()
 
@@ -1978,7 +2566,23 @@ if __name__ == "__main__":
     rx_metadata = "--no-rx-metadata" not in args and "--no-roi-feedback" not in args
     if "--roi-feedback" in args:
         rx_metadata = True
-    video_pixel_format = "uyvy422" if "--uyvy" in args else "bgra"
+    pixel_format_flags = {
+        flag for flag in ("--uyvy", "--i420", "--nv12", "--auto-video-format") if flag in args
+    }
+    if len(pixel_format_flags) > 1:
+        raise SystemExit(
+            "Use only one of --uyvy, --i420, --nv12 or --auto-video-format."
+        )
+    if "--auto-video-format" in args:
+        video_pixel_format = "auto"
+    elif "--i420" in args:
+        video_pixel_format = "i420"
+    elif "--nv12" in args:
+        video_pixel_format = "nv12"
+    elif "--uyvy" in args:
+        video_pixel_format = "uyvy422"
+    else:
+        video_pixel_format = "bgra"
     diagnostics_enabled = "--diagnostics" in args
     diagnostics_file = None
     video_prefetch_frames = 0
@@ -1986,6 +2590,7 @@ if __name__ == "__main__":
     audio_preroll_milliseconds = _DEFAULT_AUDIO_PREROLL_MILLISECONDS
     source_name = "StreamNDI"
     audio_source_name = None
+    video_hwaccel = None
 
     if "--video-prefetch-frames" in args:
         prefetch_index = args.index("--video-prefetch-frames")
@@ -2028,6 +2633,14 @@ if __name__ == "__main__":
             raise SystemExit("--audio-source-name requires a name") from exc
         del args[audio_source_name_index:audio_source_name_index + 2]
 
+    if "--video-hwaccel" in args:
+        video_hwaccel_index = args.index("--video-hwaccel")
+        try:
+            video_hwaccel = args[video_hwaccel_index + 1]
+        except IndexError as exc:
+            raise SystemExit("--video-hwaccel requires a device type") from exc
+        del args[video_hwaccel_index:video_hwaccel_index + 2]
+
     args = [
         a
         for a in args
@@ -2039,6 +2652,9 @@ if __name__ == "__main__":
             "--roi-feedback",
             "--no-roi-feedback",
             "--uyvy",
+            "--i420",
+            "--nv12",
+            "--auto-video-format",
             "--diagnostics",
             "--preload-audio",
         )
@@ -2059,4 +2675,5 @@ if __name__ == "__main__":
         video_prefetch_frames=video_prefetch_frames,
         preload_audio=preload_audio,
         audio_preroll_milliseconds=audio_preroll_milliseconds,
+        video_hwaccel=video_hwaccel,
     )

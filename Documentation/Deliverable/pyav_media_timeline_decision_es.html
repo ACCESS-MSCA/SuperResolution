@@ -20,7 +20,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Updated: 2026-06-18</p>
+    <p class="pill">Updated: 2026-09-16</p>
     <h1>Decisión de Arquitectura: Timeline único de media con PyAV</h1>
     <div class="card">
       <strong>Navigation</strong>
@@ -29,6 +29,7 @@
         <li><a href="../manual_tecnico_streaming_ndi_es.html">Manual core ES</a></li><li><a href="./ndi_sender_libndi_decision_es.html">Decisión previa: sender directo libndi</a></li>
       </ul>
     </div>
+    <div class="card"><strong>Cierre 16/09/2026:</strong> PyAV sigue vigente con bloques PCM continuos, progreso PCM nativo como autoridad, timecodes explícitos, preroll cero, audio precargado, VideoToolbox/NV12 y launchers single-TCP unificados. El A/B eliminó los glitches del antiguo launcher 1080p; la fluidez 8K AVP sigue siendo una limitación separada.</div>
     
 <p>Después de mover el sender a <code>libndi</code> directo, la deriva larga seguía apareciendo. Eso cambió el foco: el problema ya no parecía estar solo en el wrapper, sino en cómo el streamer reconstruía el tiempo de audio y vídeo.</p>
 <h2>1. Problema</h2>

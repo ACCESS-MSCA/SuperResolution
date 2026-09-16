@@ -1,6 +1,6 @@
 # Architecture Decision: Unified Media Timeline with `PyAV`
 
-Updated: 2026-06-18
+Updated: 2026-09-16
 
 Status: implemented in code and functionally validated in NDI Monitor, Unity Editor, Unity AVP Simulator, and Apple Vision Pro device build
 
@@ -9,6 +9,13 @@ Navigation:
 - Core EN manual HTML: `../technical_manual_streaming_ndi_en.html`
 - ES deliverable: `./pyav_media_timeline_decision_es.html`
 - Related previous decision: `./ndi_sender_libndi_decision_en.html`
+
+> Closure note, 2026-09-16: the PyAV timeline remains active, with continuous
+> 1024-sample PCM blocks, completed native PCM progress as authority, explicit
+> NDI timecodes, zero sender pre-roll, audio preload, VideoToolbox/NV12 and
+> unified single-TCP launchers. The final A/B removed glitches from the old
+> 1080p launcher. AVP 8K smoothness remains a separate full-bandwidth LAN/
+> receiver-delivery limitation.
 
 ## 1. Context
 

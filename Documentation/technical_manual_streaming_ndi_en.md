@@ -1,6 +1,6 @@
 # Technical Manual - SuperResolution NDI Streaming
 
-Updated: 2026-07-06
+Updated: 2026-09-16
 
 Navigation: [Index](index_en.md) | [ES](manual_tecnico_streaming_ndi_es.md) | [HTML](technical_manual_streaming_ndi_en.html)
 
@@ -17,11 +17,11 @@ This manual describes the current Python NDI streamer implementation. The primar
 ## Current Architecture
 
 ```text
-CLI -> LoopingMediaReader (PyAV)
-    -> time-ordered media events (video/audio)
-    -> single playback clock in stream_video.py
-    -> NativeNdiSender (libndi)
-    -> primary NDI output
+universal launcher -> persistent LoopingMediaReader (PyAV/VideoToolbox)
+    -> video: bounded prefetch -> NV12 -> optional direct ROI
+    -> audio: preload -> fixed 1024-sample PCM blocks -> dedicated worker
+    -> continuous timeline + explicit A/V NDI timecodes
+    -> NativeNdiSender (libndi) -> combined StreamNDI -> single-TCP
     -> optional secondary NDI output (--dual)
     -> optional Unity metadata overlay
 ```
@@ -51,8 +51,9 @@ Audio and video come from the same media timeline. The system no longer reconstr
 
 ## Design Principles
 
-- One media timeline: media PTS is the scheduling source.
-- One playback clock: `stream_video.py` controls pacing.
+- One media timeline: media PTS and completed native PCM progress govern continuity.
+- One shared A/V clock: zero sender pre-roll and explicit timecodes.
+- One universal profile: Monitor, SIM and Device receive the same emission.
 - Direct sender: the high-level wrapper is avoided in the runtime sender path.
 - Metadata as extension: Unity viewport metadata enriches the base pipeline without redefining it.
 
@@ -60,19 +61,19 @@ Audio and video come from the same media timeline. The system no longer reconstr
 
 1. CLI arguments are parsed.
 2. `LoopingMediaReader` opens the media and detects video/audio streams.
-3. Main sender and optional secondary sender are configured.
-4. The runtime consumes video or audio events already ordered by media time.
-5. The scheduler waits for each event deadline and sends the frame or audio chunk.
+3. Eligible audio is preloaded and bounded video prefetch fills before release.
+4. A dedicated worker sends continuous PCM; video follows accepted PCM progress and drops expired frames.
+5. Audio and video timecodes come from the same content position.
 6. If recent Unity metadata exists, the debug overlay can draw it into the outgoing video frame before send.
-7. At end of file, the reader reopens the media and continues with an accumulated media-time offset.
+7. At end of file, persistent readers flush/seek and continue without rebasing the timeline.
 
 ## Operation
 
 ```bash
 python3 -m pip install -r requirements.txt
-python3 stream_video.py
-python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
-python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose
+Launchers/Stream_NDI_Default.command
+Launchers/Stream_NDI_Default_8K.command
+Launchers/Stream_NDI_Default_8K_ROI.command
 ```
 
 See `setup_and_run_en.md` for the full first-time setup and validation path.
@@ -106,4 +107,12 @@ Ongoing QA:
 
 ## Current Status
 
-The base architecture is organized around direct sender, unified media timeline, and metadata as an extension layer. Long-session soak tests remain recommended as ongoing QA practice.
+A/V continuity and synchronization are closed as the technical baseline. Every
+public launcher shares single-TCP, zero pre-roll, timecodes, preloaded audio,
+prefetch, VideoToolbox/NV12 and diagnostics. The 16 September A/B removed the
+old 1080p launcher glitches by routing it through this path.
+
+Sustained AVP 8K smoothness is not closed: on the measured LAN, full-bandwidth
+delivery can fall below source cadence while sender and audio remain healthy.
+The next decision is low-latency infrastructure or a licensed compressed-NDI
+architecture, not another receiver-specific launcher.

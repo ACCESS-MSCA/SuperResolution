@@ -2,22 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
-REPO_DIR="${SCRIPT_DIR:h}"
-EXTRA_ARGS=()
 
-if [[ "${NDI_DIAGNOSTICS:-0}" == "1" ]]; then
-    EXTRA_ARGS+=(--diagnostics)
-fi
+# Public 1080p profile. Resolution is the only intentional difference from the
+# 8K profile: transport, A/V timeline, audio preload, decode path, raw pixel
+# format, diagnostics and ROI capability all use the same production contract.
+export NDI_PROFILE_LABEL="${NDI_PROFILE_LABEL:-Default 1080p60}"
+export NDI_VIDEO_PATH="${NDI_VIDEO_PATH:-Videos/big_buck_bunny.mp4}"
+export NDI_SOURCE_NAME="${NDI_SOURCE_NAME:-StreamNDI}"
+export NDI_ROI_FEEDBACK="${NDI_ROI_FEEDBACK:-0}"
 
-if [[ -n "${NDI_SOURCE_NAME:-}" ]]; then
-    EXTRA_ARGS+=(--source-name "$NDI_SOURCE_NAME")
-fi
-
-cd "$REPO_DIR"
-
-source "$SCRIPT_DIR/_ndi_runtime.zsh"
-ndi_prepare_python "$REPO_DIR" || exit 1
-
-echo "[NDI] Starting default quality stream (metadata RX enabled)..."
-echo "[NDI] Repo: $REPO_DIR"
-"$NDI_PYTHON" ./stream_video.py Videos/big_buck_bunny.mp4 "${EXTRA_ARGS[@]}"
+exec "$SCRIPT_DIR/Stream_NDI_Default_8K.command"

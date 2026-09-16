@@ -8,7 +8,7 @@
 # selects base single-TCP. This is process-local, never a machine-wide edit.
 ndi_prepare_transport() {
     local repo_dir="$1"
-    local transport="${NDI_TRANSPORT:-auto}"
+    local transport="${NDI_TRANSPORT:-single-tcp}"
     export NDI_TRANSPORT="$transport"
     case "$transport" in
         auto)
@@ -87,6 +87,19 @@ ndi_prepare_python() {
     }
 
     export NDI_PYTHON="$python"
+}
+
+ndi_warn_hx_pyav_collision() {
+    local repo_dir="$1"
+    local plugin_config="${HOME}/.ndi/ndi-plugins.v1.json"
+
+    [[ -r "$plugin_config" ]] || return 0
+    grep -q 'HX_Driver\|IPCam' "$plugin_config" 2>/dev/null || return 0
+    "$NDI_PYTHON" -c 'import glob, sys; raise SystemExit(not bool(glob.glob(sys.argv[1] + "/.venv/lib/python*/site-packages/av/.dylibs/libavdevice*.dylib")))' "$repo_dir" \
+        >/dev/null 2>&1 || return 0
+
+    print -u2 -- "[NDI] HOST WARNING: NDI HX Driver y PyAV cargan dos libavdevice con clases AVFoundation duplicadas."
+    print -u2 -- "[NDI] Para una validación de producción, desinstala/desactiva NDI HX Driver si este Mac no recibe cámaras NDI|HX. El sender full-bandwidth no lo necesita."
 }
 
 ndi_resolve_video() {

@@ -1,6 +1,6 @@
 # Indice de documentacion de SuperResolution
 
-Actualizado: 2026-07-06
+Actualizado: 2026-09-16
 
 Este indice enlaza las guias operativas, el contrato de metadata, los manuales tecnicos y las notas de entrega del streamer NDI en Python.
 
@@ -24,6 +24,7 @@ Este indice enlaza las guias operativas, el contrato de metadata, los manuales t
 - Manual de arquitectura del streaming: `manual_tecnico_streaming_ndi_es.md`
 - Version HTML: `manual_tecnico_streaming_ndi_es.html`
 - Guia simplificada de video ideal y optimizacion 8K: `video_ideal_y_optimizacion_streaming_8k_es.md`
+- Decisiones, masters, codecs y métricas consolidadas: TR-01 en el repositorio ACCESS (`ProjectContext/EuropeanProject/TechnicalReports/TR-01_LIVE_STREAMING_ARCHITECTURE.md`).
 
 ## Notas de entrega
 

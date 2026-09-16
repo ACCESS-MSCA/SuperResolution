@@ -1,6 +1,6 @@
 # Architecture Decision: Migrate the A/V Sender from `cyndilib` to `libndi`
 
-Updated: 2026-06-18
+Updated: 2026-09-16
 
 Status: implemented in code and functionally validated in NDI Monitor, Unity Editor, Unity AVP Simulator, and Apple Vision Pro device build
 
@@ -8,6 +8,13 @@ Navigation:
 - Core ES manual HTML: `../manual_tecnico_streaming_ndi_es.html`
 - Core EN manual HTML: `../technical_manual_streaming_ndi_en.html`
 - ES deliverable: `./ndi_sender_libndi_decision_es.html`
+
+> Status note, 2026-09-16: this document preserves the intermediate decision to
+> replace `cyndilib` with direct `libndi`. References to the main
+> `ffmpeg`/BGRA decode path describe that phase and are superseded by PyAV,
+> VideoToolbox/NV12, shared timeline/timecodes, continuous PCM and the universal
+> single-TCP launcher. The final alternatives, decisions and measurements are
+> consolidated in ACCESS TR-01 and the current repository README/profile guide.
 
 ## 1. Context
 

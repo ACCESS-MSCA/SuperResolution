@@ -1,6 +1,6 @@
 # Decisión de Arquitectura: Migración del Sender A/V de `cyndilib` a `libndi`
 
-Actualizado: 2026-06-18
+Actualizado: 2026-09-16
 
 Estado: implementado en código y validado funcionalmente en NDI Monitor, Unity Editor, Unity AVP Simulator y build en Apple Vision Pro
 
@@ -8,6 +8,14 @@ Navegación:
 - Manual core ES HTML: `../manual_tecnico_streaming_ndi_es.html`
 - Manual core EN HTML: `../technical_manual_streaming_ndi_en.html`
 - Deliverable EN: `./ndi_sender_libndi_decision_en.html`
+
+> Nota de estado 16/09/2026: este documento conserva la decisión intermedia de
+> migrar `cyndilib` a `libndi`. Las menciones a decode principal con
+> `ffmpeg`/BGRA describen aquella fase y están supersedidas por PyAV,
+> VideoToolbox/NV12, timeline/timecodes compartidos, audio PCM continuo y el
+> launcher universal single-TCP. La decisión final, alternativas y métricas se
+> consolidan en el TR-01 de ACCESS y en
+> `../video_ideal_y_optimizacion_streaming_8k_es.md`.
 
 ## 1. Contexto
 

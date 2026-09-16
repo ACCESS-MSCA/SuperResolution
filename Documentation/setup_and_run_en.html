@@ -7,7 +7,7 @@
   <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:0;background:#0f172a;color:#e5e7eb}main{max-width:960px;margin:0 auto;padding:40px 24px}a{color:#93c5fd}code,pre{background:#111827;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #334155;padding:8px;text-align:left}.card{border:1px solid #334155;background:#111827;border-radius:8px;padding:16px;margin:16px 0}</style>
 </head>
 <body><main>
-  <p>Updated: 2026-07-06</p>
+  <p>Updated: 2026-09-16</p>
   <h1>Setup and Run Guide</h1>
   <div class="card">Navigation: <a href="index_en.html">Index</a> · <a href="setup_and_run_es.html">ES</a> · <a href="setup_and_run_en.md">Markdown</a></div>
   <p>This guide covers first-time installation, runtime checks, and validation with NDI Monitor and the supplied Unity Simulator build.</p>
@@ -31,6 +31,12 @@ python3 -m pip install -r requirements.txt</pre>
   <pre>python3 -c "from ndi_native import get_ndi_runtime; rt = get_ndi_runtime(); print(rt.lib.NDIlib_version().decode('utf-8', errors='replace'))"</pre>
   <p>Expected result: a printed NDI runtime version, for example <code>NDI SDK APPLE ...</code>. Common failure: <code>Could not load NDI runtime library</code>. Action: install the NDI Runtime/SDK and make sure <code>libndi</code> can be found by the Python process.</p>
   <h2>Run the Streamer</h2>
+  <p>Use the launchers for operation and acceptance. All share <code>single-tcp</code>, zero pre-roll, A/V timecodes, preloaded audio, prefetch, VideoToolbox/NV12 and diagnostics. The historical <code>Default_8K</code> name does not force resolution.</p>
+  <pre>Launchers/Stream_NDI_Default.command
+Launchers/Stream_NDI_Default_8K.command
+Launchers/Stream_NDI_Default_8K_ROI.command
+Launchers/Stream_NDI_LowRes_WAN.command</pre>
+  <p>Direct CLI use is reserved for development and explicit diagnostics:</p>
   <pre>python3 stream_video.py
 python3 stream_video.py Videos/big_buck_bunny.mp4
 python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose

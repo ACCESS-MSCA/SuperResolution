@@ -36,7 +36,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Actualizado: 2026-07-06</p>
+    <p class="pill">Actualizado: 2026-09-16</p>
     <h1>Manual Técnico - SuperResolution NDI Streaming</h1>
     <p>Este manual describe la implementación actual del streamer NDI en Python. El foco principal de la arquitectura es mantener sincronía A/V estable en sesiones largas, reducir capas opacas y dejar una base clara para extender features como overlays de viewport enviados desde Unity.</p>
 
@@ -152,7 +152,7 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
     </table>
 
     <h2>10. Estado actual</h2>
-    <p>La arquitectura base queda orientada a crecer sobre una base más limpia: sender directo, timeline único y metadata como extensión.</p>
+    <p>La continuidad y sincronización A/V están cerradas como baseline técnico: todos los launchers comparten single-TCP, preroll cero, timecodes, audio precargado, prefetch, VideoToolbox/NV12 y diagnósticos. El A/B del 16/09 eliminó los glitches del antiguo launcher 1080p.</p>
     <p>Validación funcional completada en la matriz actual:</p>
     <ul>
       <li>NDI Monitor</li>
@@ -160,7 +160,7 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
       <li>Unity AVP Simulator</li>
       <li>Build en Apple Vision Pro</li>
     </ul>
-    <p>Las pruebas largas siguen siendo recomendables como disciplina de QA continua, pero la arquitectura actual ya queda validada en los targets activos del proyecto.</p>
+    <p>La fluidez 8K sostenida en AVP no está cerrada: la entrega full-bandwidth puede caer por debajo de la cadencia bajo la LAN medida. La siguiente decisión es infraestructura de baja latencia o NDI comprimido con licencia, no otro launcher por receptor.</p>
   </main>
 </body>
 </html>

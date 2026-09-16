@@ -5,6 +5,9 @@ import numpy as np
 
 from integrations.unity import UnityViewportMetadata
 from stream_video import (
+    _apply_nv12_pixels,
+    _draw_viewport_roi_nv12,
+    _nv12_plane_views,
     _apply_uyvy_pixels,
     _draw_viewport_roi_uyvy,
     _rgb_to_uyvy_bt709_limited,
@@ -46,6 +49,14 @@ def _viewport(**overrides) -> UnityViewportMetadata:
 def _neutral_frame(width: int, height: int) -> np.ndarray:
     frame = np.empty((height, width * 2), dtype=np.uint8)
     frame.reshape(height, width // 2, 4)[:] = (128, 16, 128, 16)
+    return frame
+
+
+def _neutral_nv12_frame(width: int, height: int) -> np.ndarray:
+    frame = np.empty((height + height // 2, width), dtype=np.uint8)
+    y_plane, uv_view = _nv12_plane_views(frame)
+    y_plane[:] = 16
+    uv_view[:] = (128, 128)
     return frame
 
 
@@ -135,6 +146,42 @@ class UyvyViewportOverlayTests(unittest.TestCase):
     def test_invalid_packed_row_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "four-byte pixel pairs"):
             _uyvy_pair_view(np.zeros((2, 6), dtype=np.uint8))
+
+
+class Nv12ViewportOverlayTests(unittest.TestCase):
+    def test_pixel_writer_preserves_unselected_luma_in_shared_chroma_block(self) -> None:
+        frame = _neutral_nv12_frame(4, 2)
+        y_plane, uv_view = _nv12_plane_views(frame)
+        _apply_nv12_pixels(
+            y_plane,
+            uv_view,
+            np.asarray([0], dtype=np.int32),
+            np.asarray([0], dtype=np.int32),
+            (102, 63, 240),
+        )
+        self.assertEqual(int(y_plane[0, 0]), 63)
+        self.assertEqual(int(y_plane[0, 1]), 16)
+        self.assertEqual(tuple(uv_view[0, 0]), (102, 240))
+
+    def test_planar_roi_is_drawn_in_place(self) -> None:
+        frame = _neutral_nv12_frame(32, 16)
+        address_before = frame.__array_interface__["data"][0]
+        _draw_viewport_roi_nv12(frame, _viewport(), thickness=1)
+        self.assertEqual(frame.__array_interface__["data"][0], address_before)
+
+        y_plane, uv_view = _nv12_plane_views(frame)
+        self.assertEqual(int(y_plane[4, 8]), 63)
+        self.assertEqual(tuple(uv_view[2, 4]), (102, 240))
+        self.assertEqual(int(y_plane[8, 16]), 16)
+
+    def test_overlay_is_noop_without_plane_or_gaze_hit(self) -> None:
+        frame = _neutral_nv12_frame(16, 8)
+        expected = frame.copy()
+        _draw_viewport_roi_nv12(
+            frame,
+            _viewport(plane_intersection=False, gaze_hit=False),
+        )
+        np.testing.assert_array_equal(frame, expected)
 
 
 if __name__ == "__main__":

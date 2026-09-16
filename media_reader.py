@@ -10,9 +10,11 @@ import numpy as np
 try:
     import av
     from av.audio.resampler import AudioResampler
+    from av.codec.hwaccel import HWAccel
 except ImportError as exc:  # pragma: no cover - depends on local environment.
     av = None
     AudioResampler = None
+    HWAccel = None
     _PYAV_IMPORT_ERROR = exc
 else:
     _PYAV_IMPORT_ERROR = None
@@ -27,6 +29,18 @@ _MAX_CONSECUTIVE_DECODE_ERRORS = 120
 _VIDEO_DECODE_RECOVERY_SKIP_SECONDS = 0.5
 
 
+def _select_video_pixel_format(requested: str, source: str) -> str:
+    requested = str(requested).lower()
+    if requested != "auto":
+        return requested
+    return "i420" if str(source).lower() in ("yuv420p", "yuvj420p") else "uyvy422"
+
+
+def _normalize_video_hwaccel(value: str | None) -> str | None:
+    normalized = str(value or "").strip().lower()
+    return None if normalized in ("", "none", "off", "software") else normalized
+
+
 @dataclass(frozen=True)
 class MediaInfo:
     width: int
@@ -39,6 +53,8 @@ class MediaInfo:
     audio_channels: int
     audio_max_samples_per_chunk: int
     video_pixel_format: str
+    source_video_codec: str
+    source_video_pixel_format: str
 
 
 @dataclass(frozen=True)
@@ -49,6 +65,10 @@ class MediaEvent:
 @dataclass(frozen=True)
 class MediaVideoEvent(MediaEvent):
     frame_data: np.ndarray
+    decode_ms: float = 0.0
+    pack_ms: float = 0.0
+    source_pixel_format: str = "unknown"
+    decode_backend: str = "pyav-software"
 
 
 @dataclass(frozen=True)
@@ -149,6 +169,8 @@ class LoopingMediaReader:
         decode_video: bool = True,
         decode_audio: bool = True,
         video_pixel_format: str = "bgra",
+        video_hwaccel: str | None = None,
+        video_hwaccel_fallback: bool = True,
     ) -> None:
         _require_pyav()
         if audio_channels not in _AUDIO_LAYOUT_BY_CHANNELS:
@@ -160,10 +182,16 @@ class LoopingMediaReader:
         self._decode_video = bool(decode_video)
         self._decode_audio = bool(decode_audio)
         self._video_pixel_format = str(video_pixel_format).lower()
-        if self._video_pixel_format not in ("bgra", "uyvy422"):
+        if self._video_pixel_format not in ("auto", "bgra", "uyvy422", "i420", "nv12"):
             raise ValueError(
                 f"Unsupported decoded video pixel format: '{video_pixel_format}'."
             )
+        self.video_hwaccel_requested = _normalize_video_hwaccel(video_hwaccel)
+        self._video_hwaccel_fallback = bool(video_hwaccel_fallback)
+        self._video_hwaccel_disabled = False
+        self.hardware_decode_active = False
+        self.video_decode_backend = "pyav-software"
+        self.video_hwaccel_fallback_count = 0
 
         self._video_container = None
         self._audio_container = None
@@ -252,6 +280,18 @@ class LoopingMediaReader:
             or getattr(video_stream, "guessed_rate", None)
         )
         total_frames = int(getattr(video_stream, "frames", 0) or 0)
+        source_video_codec = str(
+            getattr(video_stream.codec_context, "name", None) or "unknown"
+        )
+        source_format = getattr(video_stream.codec_context, "format", None)
+        source_video_pixel_format = str(
+            getattr(source_format, "name", None) or source_format or "unknown"
+        )
+        if self._video_pixel_format == "auto":
+            self._video_pixel_format = _select_video_pixel_format(
+                self._video_pixel_format,
+                source_video_pixel_format,
+            )
 
         # The video cadence is the loop clock. Container/audio durations often
         # include AAC encoder padding; using the longest stream here inserts a
@@ -272,13 +312,7 @@ class LoopingMediaReader:
         probe_container.close()
 
         if self._decode_video:
-            self._video_container = av.open(self._video_path)
-            self._video_stream = next(stream for stream in self._video_container.streams if stream.type == "video")
-            try:
-                self._video_stream.thread_type = "AUTO"
-            except Exception:
-                pass
-            self._video_frames = iter(self._video_container.decode(video=0))
+            self._open_video_decoder_at(0.0, seek=False)
         else:
             self._video_container = None
             self._video_stream = None
@@ -331,6 +365,8 @@ class LoopingMediaReader:
             audio_channels=self._audio_channels if audio_enabled else 0,
             audio_max_samples_per_chunk=audio_max_samples_per_chunk if audio_enabled else 0,
             video_pixel_format=self._video_pixel_format,
+            source_video_codec=source_video_codec,
+            source_video_pixel_format=source_video_pixel_format,
         )
 
     def _seek_pass_to_start(self) -> None:
@@ -389,15 +425,30 @@ class LoopingMediaReader:
             self.last_restart_ms = restart_ms
             self.restart_ms_max = max(self.restart_ms_max, restart_ms)
 
-    def _make_video_event(self, event_time: float, frame_data: np.ndarray) -> MediaVideoEvent:
+    def _make_video_event(
+        self,
+        event_time: float,
+        frame_data: np.ndarray,
+        decode_ms: float,
+        pack_ms: float,
+        source_pixel_format: str,
+        decode_backend: str,
+    ) -> MediaVideoEvent:
         self._pass_event_count += 1
-        return MediaVideoEvent(self._pass_media_offset_seconds + event_time, frame_data)
+        return MediaVideoEvent(
+            self._pass_media_offset_seconds + event_time,
+            frame_data,
+            decode_ms=decode_ms,
+            pack_ms=pack_ms,
+            source_pixel_format=source_pixel_format,
+            decode_backend=decode_backend,
+        )
 
     def _make_audio_event(self, event_time: float, samples: np.ndarray) -> MediaAudioEvent:
         self._pass_event_count += 1
         return MediaAudioEvent(self._pass_media_offset_seconds + event_time, samples)
 
-    def _open_video_decoder_at(self, target_seconds: float) -> None:
+    def _open_video_decoder_at(self, target_seconds: float, seek: bool = True) -> None:
         video_container = self._video_container
         self._video_container = None
         self._video_stream = None
@@ -405,16 +456,61 @@ class LoopingMediaReader:
         if video_container is not None:
             video_container.close()
 
-        self._video_container = av.open(self._video_path)
+        open_kwargs = {}
+        use_hwaccel = bool(
+            self.video_hwaccel_requested and not self._video_hwaccel_disabled
+        )
+        if use_hwaccel:
+            if HWAccel is None:
+                raise RuntimeError("This PyAV build does not expose hardware decoding.")
+            open_kwargs["hwaccel"] = HWAccel(
+                self.video_hwaccel_requested,
+                allow_software_fallback=False,
+            )
+        try:
+            self._video_container = av.open(self._video_path, **open_kwargs)
+        except Exception:
+            if not use_hwaccel or not self._video_hwaccel_fallback:
+                raise
+            self._video_hwaccel_disabled = True
+            self.video_hwaccel_fallback_count += 1
+            self._video_container = av.open(self._video_path)
         self._video_stream = next(stream for stream in self._video_container.streams if stream.type == "video")
         try:
             self._video_stream.thread_type = "AUTO"
         except Exception:
             pass
 
-        offset = int(max(0.0, target_seconds) * _AV_TIME_BASE)
-        self._video_container.seek(offset, any_frame=False, backward=False)
+        self.hardware_decode_active = bool(
+            use_hwaccel
+            and not self._video_hwaccel_disabled
+            and getattr(self._video_stream.codec_context, "is_hwaccel", False)
+        )
+        if self.hardware_decode_active:
+            self.video_decode_backend = f"pyav-{self.video_hwaccel_requested}"
+        elif self.video_hwaccel_requested and self._video_hwaccel_disabled:
+            self.video_decode_backend = "pyav-software-fallback"
+        else:
+            self.video_decode_backend = "pyav-software"
+
+        if seek:
+            offset = int(max(0.0, target_seconds) * _AV_TIME_BASE)
+            self._video_container.seek(offset, any_frame=False, backward=False)
         self._video_frames = iter(self._video_container.decode(video=0))
+
+    def _fallback_video_decoder_after_hw_error(self, exc: Exception) -> bool:
+        if not self.hardware_decode_active or not self._video_hwaccel_fallback:
+            return False
+        backend = self.video_decode_backend
+        self._video_hwaccel_disabled = True
+        self.hardware_decode_active = False
+        self.video_decode_backend = "pyav-software-fallback"
+        self.video_hwaccel_fallback_count += 1
+        print(
+            f"[warn] {backend} decode failed; using explicit software fallback: {exc}"
+        )
+        self._open_video_decoder_at(self._next_video_time_seconds)
+        return True
 
     def _recover_video_decoder_after_error(self) -> None:
         target_seconds = self._next_video_time_seconds + _VIDEO_DECODE_RECOVERY_SKIP_SECONDS
@@ -437,6 +533,7 @@ class LoopingMediaReader:
         if self._video_frames is None:
             return None
 
+        decode_started = time.monotonic()
         while True:
             try:
                 frame = next(self._video_frames)
@@ -447,6 +544,9 @@ class LoopingMediaReader:
             except Exception as exc:
                 if not _is_pyav_decode_error(exc):
                     raise
+                if self._fallback_video_decoder_after_hw_error(exc):
+                    decode_started = time.monotonic()
+                    continue
                 self.video_decode_errors += 1
                 self._consecutive_video_decode_errors += 1
                 self._log_decode_error(
@@ -462,19 +562,24 @@ class LoopingMediaReader:
                     ) from exc
                 self._recover_video_decoder_after_error()
                 continue
+        decode_ms = (time.monotonic() - decode_started) * 1000.0
 
         source_time = _frame_time_seconds(frame)
         if source_time is None:
             source_time = self._next_video_time_seconds
         event_time = max(source_time, self._next_video_time_seconds)
 
+        source_pixel_format = str(
+            getattr(getattr(frame, "format", None), "name", None) or "unknown"
+        )
+        pack_started = time.monotonic()
         try:
             if self._video_pixel_format == "bgra":
                 frame_data = np.ascontiguousarray(
                     frame.to_ndarray(format="bgra"),
                     dtype=np.uint8,
                 )
-            else:
+            elif self._video_pixel_format == "uyvy422":
                 packed_frame = frame.reformat(format="uyvy422")
                 plane = packed_frame.planes[0]
                 rows = np.frombuffer(plane, dtype=np.uint8).reshape(
@@ -483,6 +588,32 @@ class LoopingMediaReader:
                 )
                 frame_data = np.ascontiguousarray(
                     rows[:, : packed_frame.width * 2],
+                    dtype=np.uint8,
+                )
+            elif self._video_pixel_format == "nv12":
+                packed_frame = (
+                    frame
+                    if source_pixel_format == "nv12"
+                    else frame.reformat(format="nv12")
+                )
+                width = packed_frame.width
+                height = packed_frame.height
+                y_plane = packed_frame.planes[0]
+                uv_plane = packed_frame.planes[1]
+                y_rows = np.frombuffer(y_plane, dtype=np.uint8).reshape(
+                    height,
+                    y_plane.line_size,
+                )
+                uv_rows = np.frombuffer(uv_plane, dtype=np.uint8).reshape(
+                    height // 2,
+                    uv_plane.line_size,
+                )
+                frame_data = np.empty((height + height // 2, width), dtype=np.uint8)
+                frame_data[:height, :] = y_rows[:, :width]
+                frame_data[height:, :] = uv_rows[:, :width]
+            else:
+                frame_data = np.ascontiguousarray(
+                    frame.to_ndarray(format="yuv420p"),
                     dtype=np.uint8,
                 )
         except Exception as exc:
@@ -503,12 +634,20 @@ class LoopingMediaReader:
                 ) from exc
             self._recover_video_decoder_after_error()
             return self._read_next_video_event_in_pass()
+        pack_ms = (time.monotonic() - pack_started) * 1000.0
 
         duration_seconds = 1.0 / max(float(self.info.fps), 1.0)
         self._next_video_time_seconds = event_time + duration_seconds
         self._pass_max_end_seconds = max(self._pass_max_end_seconds, self._next_video_time_seconds)
         self._consecutive_video_decode_errors = 0
-        return self._make_video_event(event_time, frame_data)
+        return self._make_video_event(
+            event_time,
+            frame_data,
+            decode_ms,
+            pack_ms,
+            source_pixel_format,
+            self.video_decode_backend,
+        )
 
     def _append_audio_outputs(self, outputs, start_time: float) -> None:
         current_time = start_time

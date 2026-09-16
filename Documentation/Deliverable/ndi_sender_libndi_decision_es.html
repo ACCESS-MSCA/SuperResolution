@@ -57,7 +57,7 @@
   <div class="wrap">
     <section class="card">
       <h1>Decisión de Arquitectura: Sender A/V directo con <code>libndi</code></h1>
-      <p class="note"><strong>Actualizado:</strong> 2026-06-18</p>
+      <p class="note"><strong>Actualizado:</strong> 2026-09-16</p>
       <p class="note"><strong>Estado:</strong> implementado en código y validado funcionalmente en NDI Monitor, Unity Editor, Unity AVP Simulator y build en Apple Vision Pro.</p>
       <p class="note">
         <strong>Navegación:</strong>
@@ -65,6 +65,7 @@
         <a href="../technical_manual_streaming_ndi_en.html">Manual core EN</a> ·
         <a href="./ndi_sender_libndi_decision_en.html">Versión EN</a>
       </p>
+      <p class="note"><strong>Estado actual:</strong> esta decisión intermedia sigue vigente para <code>libndi</code>, pero el antiguo decode <code>ffmpeg</code>/BGRA queda supersedido por PyAV, VideoToolbox/NV12, timecodes compartidos, PCM continuo y launchers unificados single-TCP. Véase el TR-01 de ACCESS y la guía de vídeo 8K actual.</p>
 
       <h2>1. Contexto</h2>
       <p>Tras pruebas largas, el sender Python presentaba una deriva A/V sistemática: después de unos 20-30 minutos, el audio acababa retrasado entre 1 y 2 segundos respecto al vídeo. El comportamiento se reproducía tanto en Unity como en NDI Monitor, así que el problema dejó de apuntar principalmente al receiver Unity.</p>

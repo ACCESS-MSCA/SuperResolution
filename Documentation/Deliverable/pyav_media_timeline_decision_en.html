@@ -20,7 +20,7 @@
 </head>
 <body>
   <main>
-    <p class="pill">Updated: 2026-06-18</p>
+    <p class="pill">Updated: 2026-09-16</p>
     <h1>Architecture Decision: Unified Media Timeline with PyAV</h1>
     <div class="card">
       <strong>Navigation</strong>
@@ -29,6 +29,7 @@
         <li><a href="../technical_manual_streaming_ndi_en.html">Core EN manual</a></li><li><a href="./ndi_sender_libndi_decision_en.html">Previous decision: direct libndi sender</a></li>
       </ul>
     </div>
+    <div class="card"><strong>Closure note, 2026-09-16:</strong> PyAV remains active with continuous PCM blocks, completed native PCM progress as authority, explicit timecodes, zero pre-roll, audio preload, VideoToolbox/NV12 and unified single-TCP launchers. The A/B removed glitches from the old 1080p launcher; AVP 8K smoothness remains a separate limitation.</div>
     
 <p>After moving the sender to direct <code>libndi</code>, long-run drift still appeared. That shifted the focus: the problem no longer looked like only a wrapper issue, but also a consequence of how the streamer reconstructed audio and video time.</p>
 <h2>1. Problem</h2>

@@ -1,6 +1,6 @@
 # Guia de instalacion y ejecucion
 
-Actualizado: 2026-07-06
+Actualizado: 2026-09-16
 
 Navegacion: [Indice](index_es.md) | [EN](setup_and_run_en.md) | [HTML](setup_and_run_es.html)
 
@@ -56,6 +56,22 @@ Fallo comun: `Could not load NDI runtime library`.
 Accion: instalar NDI Runtime/SDK y asegurar que `libndi` puede encontrarse desde el proceso Python.
 
 ## Ejecutar el streamer
+
+Para operación y validación usar los launchers, no la CLI directa. Todos
+delegan en el mismo contrato de producción: `single-tcp`, preroll cero,
+timecodes compartidos, audio precargado, prefetch, VideoToolbox/NV12 y
+diagnósticos.
+
+```bash
+Launchers/Stream_NDI_Default.command
+Launchers/Stream_NDI_Default_8K.command
+Launchers/Stream_NDI_Default_8K_ROI.command
+Launchers/Stream_NDI_LowRes_WAN.command
+```
+
+El launcher histórico `Default_8K` no fuerza una resolución: es el núcleo
+universal y emite el archivo seleccionado a su resolución nativa. La CLI queda
+para desarrollo y diagnósticos explícitos:
 
 ```bash
 python3 stream_video.py

@@ -1,6 +1,6 @@
 # SuperResolution Documentation Index
 
-Updated: 2026-07-06
+Updated: 2026-09-16
 
 This index links the operational guides, metadata contract, technical manuals, and delivery notes for the Python NDI streamer.
 
@@ -23,6 +23,7 @@ This index links the operational guides, metadata contract, technical manuals, a
 
 - Streaming architecture manual: `technical_manual_streaming_ndi_en.md`
 - HTML version: `technical_manual_streaming_ndi_en.html`
+- Consolidated decisions, masters, codecs and measurements: ACCESS TR-01 (`ProjectContext/EuropeanProject/TechnicalReports/TR-01_LIVE_STREAMING_ARCHITECTURE.md`).
 
 ## Delivery Notes
 

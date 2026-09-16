@@ -1,6 +1,6 @@
 # SuperResolution - NDI Streaming Base
 
-Updated: 2026-09-07
+Updated: 2026-09-16
 
 ## Overview
 
@@ -13,7 +13,9 @@ Current runtime architecture is intentionally narrow:
 - `numpy` is used for frame buffers and overlays.
 - Unity metadata is received through NDI metadata frames and can be drawn back into the outgoing video.
 
-The main technical goal is long-run A/V stability without building extra corrective layers around the sender.
+The production A/V contract is now common to every public media launcher. The
+remaining 8K limitation is receiver-side full-bandwidth cadence on the measured
+AVP LAN path, not accumulated audio drift or a receiver-specific sender profile.
 
 ## Delivery Quick Start
 
@@ -47,17 +49,46 @@ CLI -> persistent looping PyAV decoder -> video events
 
 Important design choices:
 
-- Audio and video use the same media timeline, with an explicit startup audio pre-roll for the AVP jitter buffer.
+- Audio and video use the same explicit media timeline. The universal production sender uses zero startup pre-roll; non-zero pre-roll is diagnostic-only.
 - Audio is emitted in continuous 1024-sample blocks that cross loop boundaries; there are no short tail packets or floating-point loop rebases.
 - Exactly one NDI sender owns native audio clocking. Python does not pace the same PCM a second time.
+- Completed native PCM media position is the continuity authority: if an audio send stalls, video waits and shifts its future deadlines instead of consuming pre-roll and accumulating loop-by-loop drift.
 - Audio is decoded and sent on a dedicated thread so heavy video decode/overlay work cannot starve the receiver audio queue.
 - Seekable media loops reuse and flush persistent PyAV decoders. Reopening remains a compatibility fallback.
 - Diagnostics are queued and written asynchronously so filesystem flushes cannot stall the audio sender thread.
 - Late video frames are dropped before NDI send when needed to protect continuous audio; video never rebases independently from the shared A/V clock.
-- The 8K launcher sends packed UYVY 4:2:2 instead of BGRA, halving frame memory and avoiding NDI's BGRA color conversion.
-- ROI feedback is an explicit sender capability. With ROI enabled, Unity computes/sends viewport metadata and Python draws it directly on packed UYVY. With ROI disabled, Python does not start the backchannel and Unity automatically skips the viewport provider.
-- The 8K launcher defaults to ROI OFF for the clean performance path. `Stream_NDI_Default_8K_ROI.command` and its `.app` variant enable the complete feedback loop. The optional `--dual` square output remains BGRA-only.
+- I420 is supported as an explicit ROI-OFF diagnostic path. It reduces each 8192x4320 raw frame from 67.5 MiB in UYVY to 50.625 MiB, but the 45-minute 156 Mbps trial made native NDI submission slower and reduced delivered cadence, so it is not the universal production format.
+- NV12 is the current receiver-acceptance candidate for HEVC/yuv420p media. VideoToolbox frames are submitted without a 4:2:0-to-4:2:2 conversion; UYVY remains the safe fallback until Device acceptance is complete.
+- ROI feedback is an explicit sender capability. With ROI enabled, Unity computes/sends viewport metadata and Python draws it directly into NV12 or packed UYVY. With ROI disabled, Python does not start the backchannel and Unity automatically skips the viewport provider.
+- The 8K launcher defaults to the local 7680x4320/23.976 HEVC quality candidate, VideoToolbox decode and ROI OFF/NV12. `Stream_NDI_Default_8K_ROI.command` and its `.app` variant enable the same media/decode/NV12 path plus feedback drawing. The optional `--dual` square output remains BGRA-only.
+- The universal launcher defaults to isolated single-TCP. A controlled AVP comparison showed that SDK auto/RUDP could grow native receiver memory to the 5120 MB visionOS limit under the current saturated Wi-Fi path, whereas TCP backpressure kept the app alive and audio stable. `NDI_TRANSPORT=auto` remains an expert diagnostic override.
 - The sender path is direct `libndi`, not `cyndilib`.
+
+## Universal launcher contract
+
+Every public media launcher delegates to `Stream_NDI_Default_8K.command`, which
+is the historical filename of the universal production entry point. It does not
+force an 8K resolution: `Stream_NDI_Default.command` runs the original 1080p60
+file through exactly the same runtime contract.
+
+Production defaults shared by 360p, 1080p, 4K and 8K profiles:
+
+- one combined `StreamNDI` source for NDI Monitor, Unity Simulator and AVP;
+- isolated `single-tcp` transport;
+- zero sender preroll and explicit A/V media timecodes;
+- preloaded audio when it fits the 256 MiB decoded-PCM budget;
+- four-frame bounded video prefetch;
+- VideoToolbox decode with visible software fallback;
+- direct NV12 output by default, UYVY as the safe diagnostic fallback;
+- asynchronous JSONL diagnostics enabled;
+- ROI OFF unless the selected launcher or `NDI_ROI_FEEDBACK=1` enables it.
+
+The former 1080p launcher bypassed this contract: it used SDK auto/RUDP, BGRA,
+live AAC 5.1 decode/downmix, no audio preload, no prefetch and no diagnostics.
+On AVP that profile produced repeated audible glitches even though the input was
+only 1080p. Running the identical file through the universal launcher removed
+the issue in the user A/B on 16 September 2026. Resolution alone was therefore
+not a valid proxy for runtime load or stability.
 
 ## Key Files
 
@@ -66,6 +97,7 @@ Important design choices:
 | `stream_video.py` | Runtime orchestration, scheduling, dual output, metadata overlay |
 | `media_reader.py` | Unified looping A/V reader built on `PyAV` |
 | `ndi_native.py` | Minimal direct `libndi` sender and metadata capture bindings |
+| `create_8k_uhd_master.py` | Reproducible 8192x4320 H.264 to 7680x4320 HEVC quality-master conversion |
 | `utils.py` | Sender factory and visual overlay helper |
 | `extensions/backchannel/receiver.py` | Metadata backchannel capture from NDI receivers |
 | `integrations/unity/` | Unity metadata parsing and viewport interpretation |
@@ -123,7 +155,7 @@ python3 stream_video.py Videos/big_buck_bunny.mp4 --no-roi-feedback
 python3 stream_video.py Videos/big_buck_bunny.mp4 --roi-feedback
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics
 python3 stream_video.py Videos/big_buck_bunny.mp4 --diagnostics --source-name StreamNDI-Test
-python3 stream_video.py Videos/big_buck_bunny.mp4 --audio-preroll-ms 2500
+python3 stream_video.py Videos/big_buck_bunny.mp4 --audio-preroll-ms 0
 # Optional diagnostic topology only:
 python3 stream_video.py Videos/big_buck_bunny.mp4 --source-name StreamNDI --audio-source-name StreamNDI_Audio
 ```
@@ -133,7 +165,7 @@ with video in `StreamNDI`. Unity may still use a second `AudioOnly` receiver con
 to that same source, preserving the dedicated video and audio processing paths while
 keeping both media types on one NDI source timeline.
 
-The 8K launcher also requests audio preloading. Eligibility is based on the decoded PCM
+Every public launcher requests audio preloading. Eligibility is based on the decoded PCM
 memory estimate (256 MiB budget), rather than an arbitrary duration cutoff, so clips such
 as the 128-second Ghost Town test keep audio in RAM and remain isolated from video decode
 or storage stalls. Preloading uses the project's PyAV decoder and does not require a
@@ -145,11 +177,14 @@ clock remains disabled because the audio worker already paces every PCM block ag
 the application-owned media timeline.
 
 The combined default source owns the native NDI audio clock. Python feeds it fixed
-1024-sample blocks and does not apply a second wall-clock wait. Video starts 2500 ms
-after audio by default so the AVP receiver can fill its jitter buffer before the first
-presented frame.
+1024-sample blocks and does not apply a second wall-clock wait. The production default
+has zero sender preroll: audio and video start on the same content timeline for every
+receiver. Both carry explicit 100 ns NDI timecodes derived from that continuous media
+timeline. ACCESS derives its own initial PCM reservoir from those clocks and its actual
+video presentation queue; sender-side preroll remains only an explicit diagnostic
+override because generic monitors may play early audio immediately.
 
-The default 8K launcher enables asynchronous diagnostics unless
+The universal launcher enables asynchronous diagnostics unless
 `NDI_DIAGNOSTICS=0`; it also accepts explicit overrides:
 
 ```bash
@@ -160,25 +195,88 @@ NDI_AUDIO_PREROLL_MS=3000 Launchers/Stream_NDI_Default_8K.command
 
 8K ROI modes:
 
-- `Launchers/Apps/Stream NDI Default 8K.app`: ROI OFF (recommended performance baseline).
-- `Launchers/Apps/Stream NDI Default 8K ROI.app`: ROI ON.
+- `Launchers/Apps/Stream NDI Default 8K.app`: ROI OFF/NV12 (current receiver-acceptance candidate).
+- `Launchers/Apps/Stream NDI Default 8K ROI.app`: ROI ON with direct NV12 drawing.
 - `NDI_ROI_FEEDBACK=0|1` selects the same mode when invoking `Stream_NDI_Default_8K.command` directly.
+- `NDI_VIDEO_PIXEL_FORMAT=auto|i420|nv12|uyvy422|bgra` is an expert diagnostic override. The current candidate is `nv12`; incompatible ROI/I420 combinations fail instead of silently losing the overlay.
+- `NDI_VIDEO_HWACCEL=videotoolbox|none` selects decode. The 8K launcher defaults to VideoToolbox and records the backend actually used; an explicit software fallback remains visible in diagnostics.
+
+The ignored local production candidate can be regenerated without modifying the
+original H.264/AAC file:
+
+```bash
+.venv/bin/python create_8k_uhd_master.py \
+  Videos/Prod/NDI_AV_Sync_Test_002_8K_156Mbps_H264_AAC.mp4 \
+  Videos/Prod/NDI_AV_Sync_Test_002_8K_UHD_24fps_160Mbps_HEVC_AAC.mp4 \
+  --fps 24000/1001 --bitrate-mbps 160
+```
+
+The recipe preserves the complete 8192x4320 image by scaling proportionally to
+7680x4050 and adding chroma-aligned 134/136-pixel black bars. It copies the AAC packet
+payloads and timestamps instead of re-encoding audio. The measured output is
+7680x4320 HEVC Main/yuv420p, 24000/1001 fps, about 151.9 Mbit/s video, 300-to-240
+frame conversion and 10.01 seconds.
+
+Local sender gates on 15 September 2026:
+
+- 29.97 fps remained above this host's sustainable complete-pipeline capacity:
+  UYVY sent 58 and dropped 1,388 frames in 49.2 seconds; I420 sent 1,574 and
+  dropped 297 in 62.9 seconds.
+- 23.976 fps/UYVY/VideoToolbox ROI OFF sent 1,705 frames with zero drops over
+  71.6 seconds. The warmed ROI ON run sent 704 with zero drops over 30.0 seconds.
+- Direct NV12/VideoToolbox also passed short ROI OFF and ROI ON sender gates with
+  zero dropped video frames and no PCM media discontinuities. Its Device value
+  must be reassessed after removing Unity's duplicated full 8K receiver.
+- PCM media gaps, short blocks and audio lateness remained zero in all trials.
+  The prefetch now reaches its four-frame startup depth before the shared A/V
+  timeline begins, removing the observed cold-start video drops.
+
+These establish sender cadence and PCM continuity. NDI Monitor has passed the
+long A/V synchronization gate, and the user has confirmed synchronized audio in
+current SIM/Device runs plus stable 1080p audio after the launcher unification.
+Full-bandwidth 8K video smoothness on AVP remains limited by the measured LAN/
+receiver delivery path and must not be reported as achieved.
 
 Every video frame advertises `<access_stream roi_feedback="0|1" />`. Compatible Unity receivers display this state and only evaluate/send viewport metadata when the source explicitly advertises ROI ON. `--no-roi-feedback` and the legacy `--no-rx-metadata` both disable the full ROI feedback path.
 
 Diagnostics are written to `Logs/ndi_diagnostics_*.jsonl` and mirrored as compact `[diag]`
 console summaries once per second.
+`video_audio_sync_waits`, `video_audio_sync_wait_ms_total`,
+`video_audio_sync_wait_ms_max` and `av_media_delta_ms` expose when video had to
+follow delayed native audio. A bounded wait is expected under load; an increasing
+negative media delta is not.
+
+Diagnostics schema 4 records the explicit media-timecode contract and separates
+compressed decode (`video_decode_ms_max`), raw packing/conversion
+(`video_pack_ms_max`), complete reader latency and native NDI submission. It also separates two
+different measurements:
+
+Detailed slow-event records are rate-limited after the first five occurrences;
+the cumulative summary counters remain exact. This prevents a persistently slow
+format from generating tens of thousands of JSON records and perturbing the run.
+
+- `av_content_lead_ms`: PCM media position already accepted by `libndi` minus
+  video media position. With the universal profile it should remain bounded near
+  one audio block rather than a receiver-specific multi-second offset.
+- `video_clock_lag_ms` / `audio_clock_lag_ms`: cumulative delay of each completed
+  native submission against its original monotonic schedule.
+- `av_submission_drift_ms`: video clock lag minus audio clock lag. A growing
+  positive value means video submissions are falling behind audio submissions.
+
+`[sync]` and `av_sync_checkpoint` report the same data once per media loop, with
+per-loop drops and waits. Test the same `Stream_NDI_Default_8K.command` source
+unchanged in NDI Monitor and ACCESS. Do not select a receiver-specific launcher.
 
 ## Runtime Diagnostics
 
-### AVP 8K transport baseline (2026-09-09)
+### AVP 8K transport and receiver baseline
 
-The 8K launchers and existing ROI-OFF/ROI-ON apps now default to
-`NDI_TRANSPORT=single-tcp`; `auto` remains available for controlled comparisons:
+The 8K launchers and ROI-OFF/ROI-ON apps default to isolated single-TCP. The SDK
+automatic/RUDP policy remains a controlled diagnostic override:
 
 ```bash
-NDI_TRANSPORT=single-tcp Launchers/Stream_NDI_Ghost_Towns_8K24.command
 NDI_TRANSPORT=auto Launchers/Stream_NDI_Ghost_Towns_8K24.command
+NDI_TRANSPORT=single-tcp Launchers/Stream_NDI_Ghost_Towns_8K24.command
 ```
 
 Single-TCP uses the repository's `Launchers/Config/SingleTCP/ndi-config.v1.json`
@@ -190,12 +288,24 @@ machine-wide NDI preferences are modified. Invalid transport values fail before
 starting the sender. The JSONL `stream_start` records the requested policy and
 configuration directory; those fields do not prove the negotiated transport.
 
-The current AVP baseline passed 334.905 seconds after a clean scene re-entry:
+On 2026-09-15, the corrected one-video-receiver Device build still received only
+about 2–5 fps through the current AVP Wi-Fi route. Unity remained at roughly
+60–85 fps and decode/upload cost about 5–7 ms. With auto/RUDP the app reached the
+5120 MB memory high-watermark in about 22 seconds; with the identical media,
+NV12 path and timing over single-TCP it remained alive for more than three
+minutes and audio stayed stable. Direct ping to the AVP showed 3–593 ms latency
+(102 ms average), so full-cadence 8K acceptance is blocked by network throughput/
+jitter rather than sender cadence or Unity presentation cost.
+
+The 2026-09-09 AVP baseline passed 334.905 seconds after a clean scene re-entry:
 zero underruns, zero concealment and zero mixer deadline misses, with a
 2350.7–2500.0 ms reserve. The user confirmed continuous audible playback.
 The verified connection used the Mac's Ethernet interface. This is a bounded
 ROI-OFF test, not a long-session/ROI-ON sign-off or a universal networking
-recommendation. Verify
+recommendation. It was later found to be confounded by an interface change and
+two enabled full-video receivers in the Unity NDI scene. The corrected scene
+keeps one visual receiver and an AudioOnly receiver, and caps its visionOS video
+pool at 512 MiB. Verify
 actual sender sockets and interface during comparisons: the observed Mac has
 both Ethernet and Wi-Fi on the same LAN, and NDI changed interface after a scene
 reconnect. Keep the interface, clip, ROI setting and receiver prefill identical
@@ -285,10 +395,10 @@ Recommended ongoing QA:
 |---|---|---|
 | No NDI source visible | `libndi` runtime or LAN visibility | Verify runtime installation and same network segment |
 | Stream fails immediately | Missing `PyAV` dependency | Reinstall `requirements.txt` |
-| Audio drift after long session | Source generation or scheduling | Compare in NDI Monitor and Unity; inspect sender logs |
+| Audio drift after long session | Sender submissions diverge, NDI transport/presentation queues grow, or receiver playout is not tracking the shared media timeline | Test the same normal source first in NDI Monitor and then ACCESS; inspect `av_submission_drift_ms`, source timecodes and per-loop `[sync]` checkpoints, then retain both logs. |
 | Audio clicks or intermittent choppiness | Sender audio starvation under video/decode load | Keep the dedicated audio sender thread and audio-first video dropping enabled |
-| 8K audio/video stalls in BGRA mode | 8K BGRA conversion and NDI compression overload | Use `Launchers/Stream_NDI_Default_8K.command`, which selects AV1 plus UYVY performance mode |
-| AVFoundation duplicate-class warning on startup | NDI HX Driver and PyAV both load FFmpeg AVFoundation classes | Remove/disable the conflicting NDI HX FFmpeg driver for production validation |
+| 8K audio/video stalls | Raw conversion, software decode or NDI compression overload | Use the UYVY default and inspect schema-4 decode, pack and native-send timings separately. I420 is a measured diagnostic alternative, not an assumed optimization |
+| AVFoundation duplicate-class warning on startup | Optional NDI HX Driver and PyAV both load FFmpeg AVFoundation classes | The 8K launcher now diagnoses it before startup. Remove/disable NDI HX Driver for production validation when this Mac does not need to receive NDI|HX cameras; the full-bandwidth sender does not use it |
 | Video stutter under load | Decode or host pressure | Reduce source complexity and monitor timing warnings |
 | Metadata overlay missing | Unity backchannel or stale metadata | Check sender console and Unity metadata sender |
 | Metadata arrives but ROI is absent in UYVY | Invalid/stale viewport geometry or an older sender checkout | Check `[RX Viewport]`, then run the current `stream_video.py`; UYVY viewport drawing is supported in-place |
