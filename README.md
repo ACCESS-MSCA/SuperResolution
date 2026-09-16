@@ -59,10 +59,18 @@ Important design choices:
 - Late video frames are dropped before NDI send when needed to protect continuous audio; video never rebases independently from the shared A/V clock.
 - I420 is supported as an explicit ROI-OFF diagnostic path. It reduces each 8192x4320 raw frame from 67.5 MiB in UYVY to 50.625 MiB, but the 45-minute 156 Mbps trial made native NDI submission slower and reduced delivered cadence, so it is not the universal production format.
 - NV12 is the current receiver-acceptance candidate for HEVC/yuv420p media. VideoToolbox frames are submitted without a 4:2:0-to-4:2:2 conversion; UYVY remains the safe fallback until Device acceptance is complete.
+- Decoded/packed NV12 arrays are leased from a bounded reuse pool. At 7680x4320 this avoids allocating a new roughly 47.5 MiB array per frame. The lease remains owned by the asynchronous NDI submission until the following video send returns (or shutdown flushes it), so reuse cannot overwrite pixels still in native use. Diagnostics report allocation and reuse counts.
 - ROI feedback is an explicit sender capability. With ROI enabled, Unity computes/sends viewport metadata and Python draws it directly into NV12 or packed UYVY. With ROI disabled, Python does not start the backchannel and Unity automatically skips the viewport provider.
 - The 8K launcher defaults to the local 7680x4320/23.976 HEVC quality candidate, VideoToolbox decode and ROI OFF/NV12. `Stream_NDI_Default_8K_ROI.command` and its `.app` variant enable the same media/decode/NV12 path plus feedback drawing. The optional `--dual` square output remains BGRA-only.
 - The universal launcher defaults to isolated single-TCP. A controlled AVP comparison showed that SDK auto/RUDP could grow native receiver memory to the 5120 MB visionOS limit under the current saturated Wi-Fi path, whereas TCP backpressure kept the app alive and audio stable. `NDI_TRANSPORT=auto` remains an expert diagnostic override.
 - The sender path is direct `libndi`, not `cyndilib`.
+
+This optimization does not change the full-bandwidth NDI wire format and does
+not require the NDI Advanced SDK. The matching experimental Unity receiver keeps
+its jitter queue as raw UYVY on a dedicated capture worker and performs GPU
+conversion only for the frame selected for presentation. Standard NDI may still
+perform an internal NV12-to-UYVY conversion; bypassing that or sending the HEVC
+bitstream directly is outside this architecture.
 
 ## Universal launcher contract
 

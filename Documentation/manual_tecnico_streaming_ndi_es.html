@@ -71,6 +71,7 @@
     -> salida NDI secundaria opcional (--dual)
     -> overlay opcional con metadata de Unity</pre>
     <p>La decisión clave es que audio y vídeo salen del mismo timeline de media. El sistema ya no reconstruye audio por ventanas calculadas a partir del frame index de vídeo.</p>
+    <p>Los buffers de salida NV12 se reutilizan en vez de reservar un array 8K completo por frame. El lease sigue vivo durante la propiedad asíncrona de <code>libndi</code> y vuelve al pool tras el siguiente envío o el flush de cierre. En 7680x4320 evita una reserva repetida de unos 47,5 MiB. Los diagnósticos exponen reservas/reutilizaciones; píxeles, clocks, ROI y audio no cambian.</p>
 
     <h2>3. Componentes principales</h2>
     <table>

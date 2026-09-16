@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import threading
 import time
 from dataclasses import dataclass
 from fractions import Fraction
@@ -69,11 +70,32 @@ class MediaVideoEvent(MediaEvent):
     pack_ms: float = 0.0
     source_pixel_format: str = "unknown"
     decode_backend: str = "pyav-software"
+    buffer_lease: object | None = None
+
+    def release(self) -> None:
+        lease = self.buffer_lease
+        if lease is not None:
+            lease.release()
 
 
 @dataclass(frozen=True)
 class MediaAudioEvent(MediaEvent):
     samples: np.ndarray
+
+
+class _ReusableVideoBufferLease:
+    def __init__(self, array: np.ndarray, release_callback) -> None:
+        self.array = array
+        self._release_callback = release_callback
+        self._released = False
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._release_callback(self.array)
 
 
 def _require_pyav() -> None:
@@ -205,6 +227,11 @@ class LoopingMediaReader:
         self._pending_audio_events: list[MediaAudioEvent] = []
         self._next_video_event: Optional[MediaVideoEvent] = None
         self._next_audio_event: Optional[MediaAudioEvent] = None
+        self._video_buffer_pool: list[np.ndarray] = []
+        self._video_buffer_pool_lock = threading.Lock()
+        self._video_buffer_pool_limit = 8
+        self.video_buffer_allocations = 0
+        self.video_buffer_reuses = 0
 
         self._pass_media_offset_seconds = 0.0
         self._pass_max_end_seconds = 0.0
@@ -239,6 +266,8 @@ class LoopingMediaReader:
         self._audio_resampler = None
         self._audio_tail_flushed = False
         self._pending_audio_events.clear()
+        if self._next_video_event is not None:
+            self._next_video_event.release()
         self._next_video_event = None
         self._next_audio_event = None
 
@@ -433,6 +462,7 @@ class LoopingMediaReader:
         pack_ms: float,
         source_pixel_format: str,
         decode_backend: str,
+        buffer_lease=None,
     ) -> MediaVideoEvent:
         self._pass_event_count += 1
         return MediaVideoEvent(
@@ -442,7 +472,30 @@ class LoopingMediaReader:
             pack_ms=pack_ms,
             source_pixel_format=source_pixel_format,
             decode_backend=decode_backend,
+            buffer_lease=buffer_lease,
         )
+
+    def _acquire_video_buffer(self, shape: tuple[int, int]) -> _ReusableVideoBufferLease:
+        with self._video_buffer_pool_lock:
+            for index in range(len(self._video_buffer_pool) - 1, -1, -1):
+                candidate = self._video_buffer_pool[index]
+                if candidate.shape == shape and candidate.dtype == np.uint8:
+                    self._video_buffer_pool.pop(index)
+                    self.video_buffer_reuses += 1
+                    return _ReusableVideoBufferLease(candidate, self._release_video_buffer)
+
+        self.video_buffer_allocations += 1
+        return _ReusableVideoBufferLease(
+            np.empty(shape, dtype=np.uint8),
+            self._release_video_buffer,
+        )
+
+    def _release_video_buffer(self, frame_data: np.ndarray) -> None:
+        if not frame_data.flags.c_contiguous or frame_data.dtype != np.uint8:
+            return
+        with self._video_buffer_pool_lock:
+            if len(self._video_buffer_pool) < self._video_buffer_pool_limit:
+                self._video_buffer_pool.append(frame_data)
 
     def _make_audio_event(self, event_time: float, samples: np.ndarray) -> MediaAudioEvent:
         self._pass_event_count += 1
@@ -573,6 +626,7 @@ class LoopingMediaReader:
             getattr(getattr(frame, "format", None), "name", None) or "unknown"
         )
         pack_started = time.monotonic()
+        buffer_lease = None
         try:
             if self._video_pixel_format == "bgra":
                 frame_data = np.ascontiguousarray(
@@ -608,7 +662,10 @@ class LoopingMediaReader:
                     height // 2,
                     uv_plane.line_size,
                 )
-                frame_data = np.empty((height + height // 2, width), dtype=np.uint8)
+                buffer_lease = self._acquire_video_buffer(
+                    (height + height // 2, width)
+                )
+                frame_data = buffer_lease.array
                 frame_data[:height, :] = y_rows[:, :width]
                 frame_data[height:, :] = uv_rows[:, :width]
             else:
@@ -617,6 +674,8 @@ class LoopingMediaReader:
                     dtype=np.uint8,
                 )
         except Exception as exc:
+            if buffer_lease is not None:
+                buffer_lease.release()
             if not _is_pyav_decode_error(exc):
                 raise
             self.video_decode_errors += 1
@@ -647,6 +706,7 @@ class LoopingMediaReader:
             pack_ms,
             source_pixel_format,
             self.video_decode_backend,
+            buffer_lease,
         )
 
     def _append_audio_outputs(self, outputs, start_time: float) -> None:

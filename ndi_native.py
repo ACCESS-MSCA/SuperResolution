@@ -228,6 +228,7 @@ class NativeNdiSender:
         self._audio_send_lock = threading.Lock()
         self._video_async_buffer = None
         self._video_async_metadata = None
+        self._video_async_release = None
         self._video_metadata_bytes: bytes | None = None
 
         pixel_format = str(video_pixel_format).lower()
@@ -348,6 +349,10 @@ class NativeNdiSender:
                     self._runtime.lib.NDIlib_send_send_video_async_v2(ptr, None)
                 except Exception:
                     pass
+                release = self._video_async_release
+                self._video_async_release = None
+                if release is not None:
+                    release()
                 self._runtime.lib.NDIlib_send_destroy(ptr)
                 self._video_async_buffer = None
                 self._video_async_metadata = None
@@ -359,13 +364,22 @@ class NativeNdiSender:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def write_video(self, data, timecode: int | None = None) -> None:
+    def write_video(
+        self,
+        data,
+        timecode: int | None = None,
+        release_callback=None,
+    ) -> None:
         if not self._running:
+            if release_callback is not None:
+                release_callback()
             raise RuntimeError("Sender must be opened before writing video.")
 
         frame_data = np.ascontiguousarray(data, dtype=np.uint8)
         expected_size = self._video_expected_size
         if frame_data.size != expected_size:
+            if release_callback is not None:
+                release_callback()
             raise ValueError(
                 f"{self._video_pixel_format} video frame has an unexpected size: "
                 f"got {frame_data.size} bytes, expected {expected_size} "
@@ -379,14 +393,25 @@ class NativeNdiSender:
             # NDI owns the previous async buffer until the next async call
             # returns. Keep that reference alive while handing it this frame.
             self._video_frame.p_data = frame_data.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8))
-            self._runtime.lib.NDIlib_send_send_video_async_v2(
-                self._sender_ptr,
-                ctypes.byref(self._video_frame),
-            )
+            try:
+                self._runtime.lib.NDIlib_send_send_video_async_v2(
+                    self._sender_ptr,
+                    ctypes.byref(self._video_frame),
+                )
+            except Exception:
+                if release_callback is not None:
+                    release_callback()
+                raise
+            previous_release = self._video_async_release
             self._video_async_buffer = frame_data
             # Async ownership includes metadata, not only the pixel array.
             # Retain the previous bytes until the next async send returns.
             self._video_async_metadata = self._video_metadata_bytes
+            self._video_async_release = release_callback
+            # The previous async buffer is owned by NDI until this submission
+            # returns. It can now safely go back to the media-reader pool.
+            if previous_release is not None:
+                previous_release()
 
     def write_audio(self, data, timecode: int | None = None) -> None:
         if not self._running:

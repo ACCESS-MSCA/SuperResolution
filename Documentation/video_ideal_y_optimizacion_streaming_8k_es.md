@@ -117,6 +117,10 @@ red o aprobar un transporte comprimido distinto de NDI full-bandwidth.
 
 - I420 queda disponible como prueba explícita con ROI OFF: reduce un frame 8192x4320 de 67,5 MiB en UYVY a 50,625 MiB, pero la prueba de 45 minutos empeoró el envío nativo NDI y la cadencia efectiva. No es el default de producción.
 - El envío de vídeo es asíncrono y se conserva el buffer hasta que NDI deja de utilizarlo.
+- Los buffers NV12 se reutilizan mediante leases acotados. En 7680x4320 se evita
+  reservar un array nuevo de aproximadamente 47,5 MiB por frame; un buffer no
+  vuelve al pool hasta que el siguiente envío asíncrono confirma que NDI ya no
+  lo utiliza, o hasta el flush de cierre.
 - El decode de vídeo dispone de una cola limitada de prefetch; el perfil actual usa cuatro frames. Esto absorbe variaciones breves del decode sin permitir crecimiento ilimitado de memoria.
 - Audio y vídeo se decodifican por rutas separadas. El audio se envía desde un hilo dedicado para que un frame 8K costoso no vacíe la cola de audio del receptor.
 - El launcher 8K principal arranca con ROI OFF/NV12: no inicia el backchannel ni dibuja overlays, y anuncia `roi_feedback="0"` para que Unity tampoco calcule ni envíe viewport/gaze.
@@ -176,6 +180,13 @@ Master HEVC 7680x4320/23,976 a unos 151,9 Mbit/s con audio original
 ```
 
 La arquitectura base fue validada en NDI Monitor, Unity Editor, Unity AVP Simulator y Apple Vision Pro. Una regresión posterior demostró que el sender y el receptor activos ya no coincidían con esa implementación: el sender perdió bloques fijos/clock nativo y Unity usaba un clip circular alimentado desde `Update`. Ambos núcleos históricos se restauraron el 8 de septiembre de 2026 conservando ROI ON/OFF y UYVY. Un log de unas 4,5 horas del 14 de septiembre confirmó además que stalls nativos de audio consumían gradualmente el preroll mientras el vídeo seguía su reloj, acumulando aproximadamente 4,75 s de diferencia. El sender actual corrige ese mecanismo haciendo autoritativo el progreso PCM aceptado. El 15 de septiembre, una prueba de 59 minutos con preroll cero en NDI Monitor terminó con cero gaps PCM, 6,353 ms de delta de contenido y 7,448 ms de deriva relativa de envío. La prueba posterior demostró que NDI Monitor reproduce inmediatamente un preroll de 2500 ms aunque reciba timecodes explícitos; por ello el perfil universal elimina todo preroll del sender. ACCESS mantiene 10 s de capacidad, pero calcula el arranque desde los timecodes y la cola de vídeo realmente observados. El esquema 4 registra además decode, empaquetado y envío por separado. La prueba I420 de 45 minutos entregó 25,74 fps y descartó 14,12 % frente a 26,99 fps y 9,95 % del UYVY comparable; el coste se concentra en la llamada nativa NDI. El H.264 8192x4320 tampoco puede usar VideoToolbox en este Mac. El master derivado conserva toda la imagen mediante 7680x4050 + bandas de 134/136 px alineadas a croma, mantiene intactos los paquetes/timestamps AAC y produce HEVC Main 7680x4320/23,976 a unos 151,9 Mbit/s. Con VideoToolbox y UYVY, el gate local ROI OFF entregó 1.705 frames sin descartes en 71,6 s; ROI ON, después de llenar el prefetch antes de iniciar la timeline, entregó 704 sin descartes en 30 s. En ambos casos hubo cero gaps PCM, bloques cortos o audio tardío. Las pruebas actuales cubren los tres receptores con el mismo contrato; lo pendiente es la fluidez 8K sostenida en AVP bajo una ruta LAN aceptable.
+
+La rama experimental del 16 de septiembre añade dos optimizaciones sin tocar
+audio ni calidad: reutilización de arrays NV12 en el emisor y captura Unity en
+hilo QoS con cola raw UYVY. La cola conserva diez frames para mantener la ventana
+de absorción, pero baja de unos 1265,6 MiB ARGB32 a 632,8 MiB UYVY y solo convierte
+en GPU el frame presentado. La ruta anterior es el rollback. Este estado pasa
+tests estáticos, pero todavía necesita compilación y A/B real en AVP.
 
 El 16 de septiembre se encontró una última divergencia operativa: el launcher
 1080p `Stream_NDI_Default.command` seguía usando la ruta antigua SDK auto/RUDP,

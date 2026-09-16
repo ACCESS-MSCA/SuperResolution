@@ -18,7 +18,7 @@ Este manual describe la implementacion actual del streamer NDI en Python. El foc
 
 ```text
 launcher universal -> LoopingMediaReader persistente (PyAV/VideoToolbox)
-    -> vídeo: prefetch acotado -> NV12 -> ROI opcional directo
+    -> vídeo: prefetch acotado -> lease NV12 reutilizable -> ROI opcional directo
     -> audio: preload -> bloques PCM fijos de 1024 muestras -> thread dedicado
     -> timeline continuo + timecodes NDI A/V explícitos
     -> NativeNdiSender (libndi) -> StreamNDI combinado -> single-TCP
@@ -27,6 +27,13 @@ launcher universal -> LoopingMediaReader persistente (PyAV/VideoToolbox)
 ```
 
 Audio y video salen del mismo timeline de media. El sistema ya no reconstruye audio por ventanas calculadas a partir del frame index de video.
+
+Los buffers de salida NV12 se reutilizan en vez de reservar un array 8K completo
+por frame. El lease se conserva durante la propiedad asíncrona de `libndi` y solo
+se libera cuando vuelve el siguiente envío o durante el flush de cierre. En
+7680x4320 evita una reserva repetida de aproximadamente 47,5 MiB. Los diagnósticos
+incluyen contadores de reservas y reutilizaciones; píxeles, clocks, ROI y audio
+no cambian.
 
 ## Componentes principales
 

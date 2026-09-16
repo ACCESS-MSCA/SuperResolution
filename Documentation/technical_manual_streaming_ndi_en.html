@@ -67,6 +67,7 @@
     -> optional secondary NDI output (--dual)
     -> optional Unity metadata overlay</pre>
     <p>The key change is that audio and video now come from the same media timeline. The system no longer reconstructs audio by slicing a predecoded buffer from video frame indices.</p>
+    <p>NV12 output buffers are now pooled instead of allocating a new full 8K array for every frame. A lease remains alive through asynchronous <code>libndi</code> ownership and returns after the following submission or shutdown flush. At 7680x4320 this avoids a repeated allocation of roughly 47.5 MiB. Diagnostics expose allocation/reuse counters; pixels, clocks, ROI and audio scheduling are unchanged.</p>
 
     <h2>3. Main components</h2>
     <table>

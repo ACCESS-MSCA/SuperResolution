@@ -20,7 +20,11 @@ from stream_video import (
     _should_emit_slow_event,
     _stream_capabilities_metadata,
 )
-from media_reader import _normalize_video_hwaccel, _select_video_pixel_format
+from media_reader import (
+    LoopingMediaReader,
+    _normalize_video_hwaccel,
+    _select_video_pixel_format,
+)
 
 
 class StreamFeatureModeTests(unittest.TestCase):
@@ -40,6 +44,32 @@ class StreamFeatureModeTests(unittest.TestCase):
             self.assertEqual(event, 1)
         finally:
             prefetcher.close()
+
+    def test_video_prefetch_close_releases_queued_frame_leases(self):
+        class Event:
+            def __init__(self):
+                self.release_count = 0
+
+            def release(self):
+                self.release_count += 1
+
+        class Reader:
+            def __init__(self):
+                self.events = []
+
+            def read_next(self):
+                event = Event()
+                self.events.append(event)
+                return event
+
+        reader = Reader()
+        prefetcher = _VideoPrefetcher(reader, capacity=3)
+        prefetcher.start()
+        self.assertEqual(prefetcher.wait_until_ready(timeout=1.0), 3)
+        prefetcher.close()
+
+        self.assertGreaterEqual(len(reader.events), 3)
+        self.assertTrue(all(event.release_count == 1 for event in reader.events))
 
     def test_auto_video_format_uses_i420_only_for_planar_420_sources(self):
         self.assertEqual(_select_video_pixel_format("auto", "yuv420p"), "i420")
@@ -65,6 +95,7 @@ class StreamFeatureModeTests(unittest.TestCase):
         sender._video_send_lock=threading.Lock()
         sender._video_frame=NDIlib_video_frame_v2_t(xres=2,yres=2)
         sender._video_expected_size=8; sender._video_pixel_format='uyvy422'
+        sender._video_async_buffer=None; sender._video_async_release=None
         sender._video_async_metadata=b'old'; sender._video_metadata_bytes=b'new'
         observed=[]
         sender._runtime=SimpleNamespace(lib=SimpleNamespace(NDIlib_send_send_video_async_v2=lambda *_:observed.append(sender._video_async_metadata)))
@@ -72,6 +103,72 @@ class StreamFeatureModeTests(unittest.TestCase):
         self.assertEqual(observed,[b'old'])
         self.assertEqual(sender._video_async_metadata,b'new')
         self.assertEqual(sender._video_frame.timecode, 123456789)
+
+    def test_previous_async_pixel_lease_is_released_after_next_submit(self):
+        sender = NativeNdiSender.__new__(NativeNdiSender)
+        sender._running = True
+        sender._sender_ptr = None
+        sender._video_send_lock = threading.Lock()
+        sender._video_frame = NDIlib_video_frame_v2_t(xres=2, yres=2)
+        sender._video_expected_size = 8
+        sender._video_pixel_format = "uyvy422"
+        sender._video_async_buffer = None
+        sender._video_async_metadata = None
+        sender._video_metadata_bytes = None
+        released = []
+        sender._video_async_release = lambda: released.append("previous")
+        sender._runtime = SimpleNamespace(
+            lib=SimpleNamespace(NDIlib_send_send_video_async_v2=lambda *_: None)
+        )
+
+        sender.write_video(
+            np.zeros(8, dtype=np.uint8),
+            release_callback=lambda: released.append("current"),
+        )
+        self.assertEqual(released, ["previous"])
+
+        sender.write_video(np.zeros(8, dtype=np.uint8))
+        self.assertEqual(released, ["previous", "current"])
+
+    def test_final_async_pixel_lease_is_released_on_sender_close(self):
+        sender = NativeNdiSender.__new__(NativeNdiSender)
+        sender._running = True
+        sender._sender_ptr = object()
+        sender._video_send_lock = threading.Lock()
+        sender._audio_send_lock = threading.Lock()
+        sender._video_async_buffer = np.zeros(8, dtype=np.uint8)
+        sender._video_async_metadata = None
+        released = []
+        sender._video_async_release = lambda: released.append("final")
+        sender._runtime = SimpleNamespace(
+            lib=SimpleNamespace(
+                NDIlib_send_send_video_async_v2=lambda *_: None,
+                NDIlib_send_destroy=lambda *_: None,
+            )
+        )
+
+        sender.close()
+
+        self.assertEqual(released, ["final"])
+
+    def test_nv12_buffer_pool_reuses_released_allocation(self):
+        reader = LoopingMediaReader.__new__(LoopingMediaReader)
+        reader._video_buffer_pool = []
+        reader._video_buffer_pool_lock = threading.Lock()
+        reader._video_buffer_pool_limit = 8
+        reader.video_buffer_allocations = 0
+        reader.video_buffer_reuses = 0
+
+        first = reader._acquire_video_buffer((6, 8))
+        first_array = first.array
+        first.release()
+        first.release()
+        second = reader._acquire_video_buffer((6, 8))
+
+        self.assertIs(second.array, first_array)
+        self.assertEqual(reader.video_buffer_allocations, 1)
+        self.assertEqual(reader.video_buffer_reuses, 1)
+        second.release()
 
     def test_native_sender_configures_i420_layout(self):
         with patch("ndi_native.get_ndi_runtime", return_value=SimpleNamespace()):

@@ -193,6 +193,13 @@ class _VideoPrefetcher:
     def close(self) -> None:
         self._stop_event.set()
         self._thread.join(timeout=3.0)
+        while True:
+            try:
+                kind, payload, _ = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "event" and hasattr(payload, "release"):
+                payload.release()
 
     def read_next(self):
         wait_started = time.monotonic()
@@ -218,6 +225,8 @@ class _VideoPrefetcher:
                 event = self._reader.read_next()
                 read_ms = (time.monotonic() - read_started) * 1000.0
                 if not self._put(("event", event, read_ms)):
+                    if hasattr(event, "release"):
+                        event.release()
                     return
         except Exception as exc:
             self._put(("error", exc, 0.0))
@@ -2236,6 +2245,7 @@ def stream_video(
                                 late_ms=round(video_late_seconds * 1000.0, 3),
                                 media_time=round(event.media_time_seconds, 6),
                             )
+                        event.release()
                         continue
 
                     frame_data = event.frame_data
@@ -2266,7 +2276,11 @@ def stream_video(
 
                     plain_frame = frame_data.ravel()
                     send_started = time.monotonic()
-                    sender_plain.write_video(plain_frame, timecode=event_timecode)
+                    sender_plain.write_video(
+                        plain_frame,
+                        timecode=event_timecode,
+                        release_callback=event.release,
+                    )
                     send_ms = (time.monotonic() - send_started) * 1000.0
                     video_send_ms_max = max(video_send_ms_max, send_ms)
                     if send_ms > _DIAGNOSTIC_SEND_WARN_SECONDS * 1000.0:
@@ -2408,6 +2422,8 @@ def stream_video(
                         video_loop_seek_restarts=getattr(media_reader, "seek_restart_count", 0),
                         video_loop_reopens=getattr(media_reader, "reopen_restart_count", 0),
                         video_loop_restart_ms_max=getattr(media_reader, "restart_ms_max", 0.0),
+                        video_buffer_allocations=getattr(media_reader, "video_buffer_allocations", 0),
+                        video_buffer_reuses=getattr(media_reader, "video_buffer_reuses", 0),
                         audio_events=audio_stats["events"],
                         audio_late=audio_stats["late_count"],
                         audio_late_ms_max=audio_stats["late_ms_max"],
@@ -2538,6 +2554,8 @@ def stream_video(
                 video_decode_backend=media_reader.video_decode_backend,
                 hardware_decode_active=media_reader.hardware_decode_active,
                 video_hwaccel_fallbacks=media_reader.video_hwaccel_fallback_count,
+                video_buffer_allocations=media_reader.video_buffer_allocations,
+                video_buffer_reuses=media_reader.video_buffer_reuses,
                 audio_events=audio_stats["events"],
                 audio_late=audio_stats["late_count"],
                 audio_gap_count=audio_stats["media_gap_count"],

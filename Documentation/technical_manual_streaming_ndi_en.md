@@ -18,7 +18,7 @@ This manual describes the current Python NDI streamer implementation. The primar
 
 ```text
 universal launcher -> persistent LoopingMediaReader (PyAV/VideoToolbox)
-    -> video: bounded prefetch -> NV12 -> optional direct ROI
+    -> video: bounded prefetch -> reusable NV12 lease -> optional direct ROI
     -> audio: preload -> fixed 1024-sample PCM blocks -> dedicated worker
     -> continuous timeline + explicit A/V NDI timecodes
     -> NativeNdiSender (libndi) -> combined StreamNDI -> single-TCP
@@ -27,6 +27,13 @@ universal launcher -> persistent LoopingMediaReader (PyAV/VideoToolbox)
 ```
 
 Audio and video come from the same media timeline. The system no longer reconstructs audio by slicing a predecoded buffer from video frame indices.
+
+NV12 output buffers are pooled instead of allocating a new full 8K array for
+every frame. A lease is retained through asynchronous `libndi` ownership and is
+released only after the next submission returns or the sender flushes on close.
+At 7680x4320 this avoids a repeated allocation of roughly 47.5 MiB. Allocation
+and reuse counters are included in diagnostics. Media pixels, clocks, ROI and
+audio scheduling are unchanged.
 
 ## Main Components
 
