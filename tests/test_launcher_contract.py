@@ -17,7 +17,7 @@ class LauncherContractTests(unittest.TestCase):
         required = (
             'NDI_TRANSPORT="${NDI_TRANSPORT:-single-tcp}"',
             'NDI_AUDIO_PREROLL_MS:-0',
-            'NDI_VIDEO_PREFETCH_FRAMES:-4',
+            'NDI_VIDEO_PREFETCH_FRAMES:-6',
             'NDI_VIDEO_PIXEL_FORMAT:-nv12',
             'NDI_VIDEO_HWACCEL:-videotoolbox',
             'NDI_PRELOAD_AUDIO:-1',
@@ -26,6 +26,7 @@ class LauncherContractTests(unittest.TestCase):
             "ndi_prepare_python",
             "--preload-audio",
             "--video-prefetch-frames",
+            "--audio-file",
         )
         for token in required:
             self.assertIn(token, launcher)
@@ -46,6 +47,14 @@ class LauncherContractTests(unittest.TestCase):
         roi_launcher = read_launcher("Stream_NDI_Default_8K_ROI.command")
         self.assertIn("NDI_ROI_FEEDBACK=1", roi_launcher)
         self.assertIn('exec "$SCRIPT_DIR/Stream_NDI_Default_8K.command"', roi_launcher)
+
+    def test_ghost_profile_requires_optimized_video_and_audio_pair(self):
+        launcher = read_launcher("Stream_NDI_Ghost_Towns_8K24.command")
+
+        self.assertIn("Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4", launcher)
+        self.assertIn("Ghost_Towns_8K_AAC_48k_Stereo.m4a", launcher)
+        self.assertIn('export NDI_AUDIO_PATH="$OPTIMIZED_AUDIO"', launcher)
+        self.assertIn('NDI_VIDEO_PREFETCH_FRAMES:-6', launcher)
 
     def test_default_1080p_profile_no_longer_uses_legacy_rudp_bgra_path(self):
         launcher = read_launcher("Stream_NDI_Default.command")

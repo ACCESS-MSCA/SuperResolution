@@ -6,6 +6,7 @@ Logs/
 *.pyo
 .idea/
 *.mp4
+Videos/Prod/*.m4a
 *.md
 !Documentation/**/*.md
 .DS_Store

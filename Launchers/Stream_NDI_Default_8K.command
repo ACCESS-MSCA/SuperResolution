@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="${0:A:h}"
 REPO_DIR="${SCRIPT_DIR:h}"
 VIDEO_PATH="${NDI_VIDEO_PATH:-Videos/Prod/NDI_AV_Sync_Test_002_8K_UHD_24fps_160Mbps_HEVC_AAC.mp4}"
-VIDEO_PREFETCH_FRAMES="${NDI_VIDEO_PREFETCH_FRAMES:-4}"
+VIDEO_PREFETCH_FRAMES="${NDI_VIDEO_PREFETCH_FRAMES:-6}"
+AUDIO_PATH="${NDI_AUDIO_PATH:-}"
 AUDIO_PREROLL_MS="${NDI_AUDIO_PREROLL_MS:-0}"
 ROI_FEEDBACK="${NDI_ROI_FEEDBACK:-0}"
 VIDEO_PIXEL_FORMAT="${NDI_VIDEO_PIXEL_FORMAT:-nv12}"
@@ -91,6 +92,14 @@ VIDEO_PATH="$(ndi_resolve_video "$REPO_DIR" "$VIDEO_PATH")" || {
     exit 1
 }
 
+if [[ -n "$AUDIO_PATH" ]]; then
+    AUDIO_PATH="$(ndi_resolve_video "$REPO_DIR" "$AUDIO_PATH")" || {
+        ndi_fail "No se encuentra el audio sidecar configurado en NDI_AUDIO_PATH."
+        exit 1
+    }
+    EXTRA_ARGS+=(--audio-file "$AUDIO_PATH")
+fi
+
 ndi_prepare_transport "$REPO_DIR" || exit 1
 ndi_prepare_python "$REPO_DIR" || exit 1
 ndi_warn_hx_pyav_collision "$REPO_DIR"
@@ -98,6 +107,9 @@ ndi_warn_hx_pyav_collision "$REPO_DIR"
 echo "[NDI] Starting universal production stream: $PROFILE_LABEL"
 echo "[NDI] Repo: $REPO_DIR"
 echo "[NDI] Video: $VIDEO_PATH"
+if [[ -n "$AUDIO_PATH" ]]; then
+    echo "[NDI] Audio sidecar: $AUDIO_PATH"
+fi
 echo "[NDI] Video prefetch: $VIDEO_PREFETCH_FRAMES frames"
 echo "[NDI] Audio preroll: $AUDIO_PREROLL_MS ms"
 echo "[NDI] NDI pixels: ${VIDEO_PIXEL_FORMAT:u}"

@@ -85,7 +85,7 @@ Production defaults shared by 360p, 1080p, 4K and 8K profiles:
 - isolated `single-tcp` transport;
 - zero sender preroll and explicit A/V media timecodes;
 - preloaded audio when it fits the 256 MiB decoded-PCM budget;
-- four-frame bounded video prefetch;
+- six-frame bounded video prefetch (about 95 MiB more than the former four-frame queue at 8K NV12);
 - VideoToolbox decode with visible software fallback;
 - direct NV12 output by default, UYVY as the safe diagnostic fallback;
 - asynchronous JSONL diagnostics enabled;
@@ -106,6 +106,7 @@ not a valid proxy for runtime load or stability.
 | `media_reader.py` | Unified looping A/V reader built on `PyAV` |
 | `ndi_native.py` | Minimal direct `libndi` sender and metadata capture bindings |
 | `create_8k_uhd_master.py` | Reproducible 8192x4320 or native 7680x4320 source to HEVC/NV12 quality-master conversion; optional AAC normalization |
+| `create_audio_sidecar.py` | Compact AAC 48 kHz stereo sidecar generation for fast deterministic audio preload |
 | `utils.py` | Sender factory and visual overlay helper |
 | `extensions/backchannel/receiver.py` | Metadata backchannel capture from NDI receivers |
 | `integrations/unity/` | Unity metadata parsing and viewport interpretation |
@@ -177,7 +178,9 @@ Every public launcher requests audio preloading. Eligibility is based on the dec
 memory estimate (256 MiB budget), rather than an arbitrary duration cutoff, so clips such
 as the 128-second Ghost Town test keep audio in RAM and remain isolated from video decode
 or storage stalls. Preloading uses the project's PyAV decoder and does not require a
-separate `ffmpeg` executable.
+separate `ffmpeg` executable. `NDI_AUDIO_PATH` or `--audio-file` may point to an
+audio-only sidecar; the emitted NDI source is still one combined `StreamNDI` source with
+one shared timeline. This avoids scanning a multi-gigabyte interleaved master at startup.
 
 `--audio-source-name` remains available only for topology diagnostics. It publishes PCM
 on a separate NDI source and removes audio from the primary video source. Its NDI sender
@@ -234,13 +237,25 @@ only the delivery master changes to HEVC Main/NV12 plus AAC 48 kHz stereo:
   Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
   Videos/Prod/Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4 \
   --fps source --bitrate-mbps 160 --audio-codec aac
+
+.venv/bin/python create_audio_sidecar.py \
+  Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
+  Videos/Prod/Ghost_Towns_8K_AAC_48k_Stereo.m4a \
+  --bitrate-kbps 320
 ```
 
-`Stream_NDI_Ghost_Towns_8K24.command` prefers that ignored local derivative
-when present and otherwise falls back to the original. Current diagnostics show
+`Stream_NDI_Ghost_Towns_8K24.command` prefers the ignored local video/audio pair
+when both files are present and otherwise falls back to the original. Current diagnostics show
 that VideoToolbox can already decode the VP9 original on this Mac, so the
 derivative standardizes production media and loop behavior; it does not reduce
 full-bandwidth NDI wire traffic because NDI receives the same decoded pixels.
+
+The 17 September smoke test generated a 4.76 MB sidecar, preloaded 6,156,066
+stereo samples in 166.2 ms and completed three 128.25-second loop boundaries
+without boundary drops. The complete 396.6-second run retained zero PCM gaps,
+audio lateness, short blocks, decode errors or hardware fallbacks. Forty-six
+late frames still occurred in native-send stalls inside the loops; the sidecar
+and six-frame lookahead solve startup/loop continuity, not transport blocking.
 
 Local sender gates on 15 September 2026:
 
@@ -253,7 +268,7 @@ Local sender gates on 15 September 2026:
   zero dropped video frames and no PCM media discontinuities. Its Device value
   must be reassessed after removing Unity's duplicated full 8K receiver.
 - PCM media gaps, short blocks and audio lateness remained zero in all trials.
-  The prefetch now reaches its four-frame startup depth before the shared A/V
+  The prefetch now reaches its six-frame startup depth before the shared A/V
   timeline begins, removing the observed cold-start video drops.
 
 These establish sender cadence and PCM continuity. NDI Monitor has passed the

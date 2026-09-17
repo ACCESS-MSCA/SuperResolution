@@ -57,10 +57,18 @@ HEVC Main/NV12 a 160 Mbit/s, AAC 48 kHz y la misma cadencia `5959/250`.
   Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
   Videos/Prod/Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4 \
   --fps source --bitrate-mbps 160 --audio-codec aac
+
+.venv/bin/python create_audio_sidecar.py \
+  Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
+  Videos/Prod/Ghost_Towns_8K_AAC_48k_Stereo.m4a \
+  --bitrate-kbps 320
 ```
 
-El launcher Ghost Town prefiere automáticamente este derivado si existe y cae
-al WebM original si no. Para material nuevo se recomienda 24 o 23,976 fps CFR;
+El launcher Ghost Town prefiere automáticamente el vídeo HEVC cuando también
+existe su sidecar AAC y cae al WebM original si falta cualquiera de los dos. El
+sidecar evita recorrer el MP4 8K de varios gigabytes para precargar el audio;
+NDI sigue publicando una sola fuente combinada y una sola timeline. Para material
+nuevo se recomienda 24 o 23,976 fps CFR;
 23,836 fps se conserva aquí para no alterar el montaje temporal del original.
 
 ## 2. Qué debe evitarse
@@ -97,10 +105,17 @@ Para Ghost Towns, iniciar con:
 Launchers/Stream_NDI_Ghost_Towns_8K24.command
 ```
 
-El lanzador usa el derivado HEVC si está disponible, NV12, cuatro frames de
+El lanzador usa la pareja HEVC/AAC si está disponible, NV12, seis frames de
 prefetch, precarga de audio y diagnósticos. I420 queda como override de
 diagnóstico. Cambiar VP9 por HEVC reduce variabilidad del master, no el caudal
 NDI estándar posterior.
+
+Gate del 17/09/2026: el sidecar de 4,76 MB precargó 6.156.066 samples en
+166,2 ms y el sender cruzó tres loops de 128,25 s sin añadir descartes en los
+cortes. En 396,6 s hubo cero gaps PCM, audio tardío, bloques cortos, errores de
+decode o fallback hardware. Los 46 frames tardíos restantes aparecieron en
+stalls de la llamada nativa NDI dentro de los loops; esta optimización no se
+presenta como solución de transporte.
 
 Los lanzadores 8K usan por defecto `single-tcp` aislado. En la comparación
 controlada del 15/09/2026, con una build ya corregida a un solo receptor visual,
@@ -145,7 +160,7 @@ full-bandwidth.
   reservar un array nuevo de aproximadamente 47,5 MiB por frame; un buffer no
   vuelve al pool hasta que el siguiente envío asíncrono confirma que NDI ya no
   lo utiliza, o hasta el flush de cierre.
-- El decode de vídeo dispone de una cola limitada de prefetch; el perfil actual usa cuatro frames. Esto absorbe variaciones breves del decode sin permitir crecimiento ilimitado de memoria.
+- El decode de vídeo dispone de una cola limitada de prefetch; el perfil actual usa seis frames. El worker alcanza el final y reposiciona el decoder mientras todavía quedan frames del ciclo actual en la cola. Frente a cuatro frames añade unos 95 MiB en NV12 8K y absorbe picos breves sin permitir crecimiento ilimitado de memoria.
 - Audio y vídeo se decodifican por rutas separadas. El audio se envía desde un hilo dedicado para que un frame 8K costoso no vacíe la cola de audio del receptor.
 - El launcher 8K principal arranca con ROI OFF/NV12: no inicia el backchannel ni dibuja overlays, y anuncia `roi_feedback="0"` para que Unity tampoco calcule ni envíe viewport/gaze.
 - La variante `Stream_NDI_Default_8K_ROI.command`/`.app` activa ROI ON. En ese modo, el ROI y el marcador de gaze se dibujan directamente sobre los planos Y/UV de NV12, sin volver a BGRA. UYVY conserva su renderer directo de fallback y el overlay `--dual`/cuadrado sigue limitado a BGRA.
@@ -160,9 +175,9 @@ full-bandwidth.
 - La salida se normaliza a PCM `float32` planar, estéreo y `48 kHz`, que es el formato entregado a NDI.
 - Se envían siempre bloques de 1024 muestras; `audio_short_blocks`, `audio_output_gaps` y `audio_output_bursts` deben permanecer a cero.
 - La fuente combinada debe reportar `audio_native_clock=true`; la fuente separada de diagnóstico mantiene ese clock desactivado.
-- El lanzador 8K solicita precargar el audio mediante PyAV para aislarlo de bloqueos del disco o del decode de vídeo, sin depender de un ejecutable `ffmpeg` externo.
+- El lanzador 8K solicita precargar el audio mediante PyAV para aislarlo de bloqueos del disco o del decode de vídeo, sin depender de un ejecutable `ffmpeg` externo. `NDI_AUDIO_PATH` permite usar un sidecar AAC compacto sin crear una segunda fuente NDI.
 - La precarga se decide por memoria, no por una duración arbitraria: presupuesto máximo de `256 MiB` de PCM decodificado.
-- Ghost Towns necesita aproximadamente 47 MiB de PCM, por lo que entra holgadamente en ese presupuesto cuando FFmpeg está disponible.
+- Ghost Towns necesita aproximadamente 47 MiB de PCM, por lo que entra holgadamente en ese presupuesto. Su sidecar evita que la precarga tenga que demultiplexar el máster HEVC completo.
 - Si la precarga no puede realizarse, existe un fallback de decode continuo con PyAV; funciona, pero la precarga sigue siendo preferible para una sesión 8K de producción.
 
 ### Diagnóstico y operación

@@ -69,11 +69,16 @@ audio scheduling are unchanged.
 
 1. CLI arguments are parsed.
 2. `LoopingMediaReader` opens the media and detects video/audio streams.
-3. Eligible audio is preloaded and bounded video prefetch fills before release.
+3. Eligible audio is preloaded from the media or a compact AAC sidecar, and the bounded six-frame video prefetch fills before release.
 4. A dedicated worker sends continuous PCM; video follows accepted PCM progress and drops expired frames.
 5. Audio and video timecodes come from the same content position.
 6. If recent Unity metadata exists, the debug overlay can draw it into the outgoing video frame before send.
 7. At end of file, persistent readers flush/seek and continue without rebasing the timeline.
+
+The sidecar is only an internal PCM preload source. Audio and video remain
+multiplexed into one NDI source with the same timecodes. Six queued frames let
+the decode worker prepare the next loop while the consumer is still presenting
+the tail of the current cycle.
 
 ## Operation
 

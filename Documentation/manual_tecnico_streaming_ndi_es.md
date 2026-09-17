@@ -69,11 +69,16 @@ no cambian.
 
 1. Se parsean argumentos CLI.
 2. `LoopingMediaReader` abre el media y detecta streams de video/audio.
-3. Se precarga audio si cabe y se llena el prefetch antes de liberar la timeline.
+3. Se precarga audio si cabe —desde el media o un sidecar AAC— y se llena el prefetch acotado de seis frames antes de liberar la timeline.
 4. Un thread emite PCM continuo; vídeo sigue el progreso PCM aceptado y descarta frames vencidos.
 5. Audio y vídeo reciben timecodes de la misma posición de contenido.
 6. Si hay metadata reciente de Unity, el overlay debug puede dibujarla sobre el frame antes del envio.
 7. Al llegar al final, los readers persistentes se vacían/reposicionan y continúan sin rebasar la timeline.
+
+El sidecar es únicamente una fuente interna de PCM para la precarga. Audio y
+vídeo siguen saliendo multiplexados en una sola fuente NDI y con los mismos
+timecodes. La cola de seis frames permite que el worker prepare el siguiente
+loop mientras el consumidor todavía presenta el final del ciclo actual.
 
 ## Operacion
 

@@ -19,6 +19,7 @@ Usage:
     python stream_video.py <path_to_video> --diagnostics-file Logs/run.jsonl
     python stream_video.py <path_to_video> --source-name StreamNDI-Test
     python stream_video.py <path_to_video> --audio-source-name StreamNDI_Audio
+    python stream_video.py <path_to_video> --audio-file <path_to_audio_sidecar>
     python stream_video.py <path_to_video> --video-prefetch-frames 4 --preload-audio
     python stream_video.py <path_to_video> --audio-preroll-ms 0
 """
@@ -1348,53 +1349,70 @@ def _send_audio_event(
         sender_overlay.write_audio(event.samples, timecode=timecode)
 
 
-def _preload_audio_pcm_pyav(video_path: str, loop_duration_seconds: float) -> np.ndarray:
-    """Decode one audio loop without requiring a system ffmpeg executable."""
-    from media_reader import LoopingMediaReader, MediaAudioEvent
+def _preload_audio_pcm_pyav(audio_path: str, loop_duration_seconds: float) -> np.ndarray:
+    """Decode one audio loop from a media file or audio-only sidecar."""
+    import av
+    from media_reader import _audio_frame_to_planar_float32, _frame_time_seconds
 
     expected_samples = max(1, int(round(loop_duration_seconds * 48000.0)))
     planar = np.zeros((2, expected_samples), dtype=np.float32)
     written_end = 0
-    reader = LoopingMediaReader(
-        video_path,
-        audio_sample_rate=_AUDIO_OUTPUT_SAMPLE_RATE,
-        audio_channels=_AUDIO_OUTPUT_CHANNELS,
-        decode_video=False,
-        decode_audio=True,
+    next_audio_time = 0.0
+    container = av.open(str(audio_path))
+    audio_stream = next(
+        (stream for stream in container.streams if stream.type == "audio"),
+        None,
+    )
+    if audio_stream is None:
+        container.close()
+        raise RuntimeError(f"No audio stream found in '{audio_path}'.")
+    resampler = av.AudioResampler(
+        format="fltp",
+        layout="stereo",
+        rate=_AUDIO_OUTPUT_SAMPLE_RATE,
     )
 
-    try:
-        while written_end < expected_samples:
-            event = reader.read_next()
-            # read_next() restarts transparently at EOF. Only cache the first
-            # pass; the fixed-block source performs the later loops itself.
-            if reader.restart_count > 1:
-                break
-            if not isinstance(event, MediaAudioEvent):
-                continue
-
-            samples = np.ascontiguousarray(event.samples, dtype=np.float32)
+    def append_outputs(outputs) -> None:
+        nonlocal next_audio_time, written_end
+        for output_frame in outputs or []:
+            samples = _audio_frame_to_planar_float32(
+                output_frame,
+                _AUDIO_OUTPUT_CHANNELS,
+            )
             if samples.ndim != 2 or samples.shape[0] != _AUDIO_OUTPUT_CHANNELS:
                 raise ValueError(f"Unexpected preloaded audio shape: {samples.shape}")
 
+            source_time = _frame_time_seconds(output_frame)
+            if source_time is None:
+                source_time = next_audio_time
+            event_time = max(0.0, float(source_time), next_audio_time)
             event_start = max(
                 0,
-                int(round(event.media_time_seconds * _AUDIO_OUTPUT_SAMPLE_RATE)),
+                int(round(event_time * _AUDIO_OUTPUT_SAMPLE_RATE)),
             )
-            source_offset = max(0, written_end - event_start)
-            destination_start = event_start + source_offset
-            if destination_start >= expected_samples or source_offset >= samples.shape[1]:
+            if event_start >= expected_samples:
+                return
+            copy_count = min(samples.shape[1], expected_samples - event_start)
+            if copy_count <= 0:
                 continue
-            copy_count = min(
-                samples.shape[1] - source_offset,
-                expected_samples - destination_start,
+            planar[:, event_start:event_start + copy_count] = samples[:, :copy_count]
+            written_end = max(written_end, event_start + copy_count)
+            next_audio_time = event_start / _AUDIO_OUTPUT_SAMPLE_RATE + (
+                copy_count / _AUDIO_OUTPUT_SAMPLE_RATE
             )
-            planar[
-                :, destination_start:destination_start + copy_count
-            ] = samples[:, source_offset:source_offset + copy_count]
-            written_end = max(written_end, destination_start + copy_count)
+
+    try:
+        for packet in container.demux(audio_stream):
+            for frame in packet.decode():
+                append_outputs(resampler.resample(frame))
+                if written_end >= expected_samples:
+                    break
+            if written_end >= expected_samples:
+                break
+        if written_end < expected_samples:
+            append_outputs(resampler.resample(None))
     finally:
-        reader.close()
+        container.close()
 
     if written_end <= 0:
         raise RuntimeError("PyAV audio preload produced no samples.")
@@ -1516,7 +1534,8 @@ def _calculate_av_sync_metrics(
 
 
 def _run_audio_sender(
-    video_path: str,
+    audio_path: str,
+    fallback_video_path: str,
     sender_plain,
     sender_overlay,
     sender_audio,
@@ -1539,7 +1558,7 @@ def _run_audio_sender(
             preload_started = time.monotonic()
             try:
                 cached_pcm = _preload_audio_pcm_pyav(
-                    video_path,
+                    audio_path,
                     loop_duration_seconds,
                 )
                 preload_ms = (time.monotonic() - preload_started) * 1000.0
@@ -1549,6 +1568,7 @@ def _run_audio_sender(
                     preload_ms=round(preload_ms, 3),
                     duration=round(loop_duration_seconds, 6),
                     backend="pyav",
+                    audio_path=str(audio_path),
                 )
                 print(
                     f"[info] audio preloaded: {cached_pcm.shape[1]} samples in "
@@ -1556,12 +1576,17 @@ def _run_audio_sender(
                 )
             except Exception as exc:
                 cached_pcm = None
-                diagnostics.emit("audio_preload_fallback", error=str(exc))
+                diagnostics.emit(
+                    "audio_preload_fallback",
+                    error=str(exc),
+                    audio_path=str(audio_path),
+                    fallback_path=str(fallback_video_path),
+                )
                 print(f"[warn] audio preload failed; using streaming fallback: {exc}")
 
         if cached_pcm is None:
             reader = LoopingMediaReader(
-                video_path,
+                fallback_video_path,
                 audio_sample_rate=48000,
                 audio_channels=2,
                 decode_video=False,
@@ -1725,6 +1750,7 @@ def stream_video(
     video_path: str,
     source_name: str = "StreamNDI",
     audio_source_name: str | None = None,
+    audio_file: str | None = None,
     dual: bool = False,
     rx_metadata: bool = True,
     rx_metadata_verbose: bool = False,
@@ -1755,6 +1781,9 @@ def stream_video(
         video_hwaccel_fallback=True,
     )
     media_info = media_reader.info
+    audio_path = str(audio_file) if audio_file else str(video_path)
+    if audio_file and not Path(audio_path).is_file():
+        raise FileNotFoundError(f"Audio sidecar not found: {audio_path}")
 
     if rx_metadata and media_info.video_pixel_format == "i420":
         raise ValueError(
@@ -1792,9 +1821,16 @@ def stream_video(
     height = media_info.height
     fps = media_info.fps
     total_frames = media_info.total_video_frames
-    audio_enabled = media_info.audio_enabled
+    audio_enabled = bool(media_info.audio_enabled or audio_file)
     audio_preroll_milliseconds = max(0.0, float(audio_preroll_milliseconds))
     fps_float = float(fps)
+    audio_sample_rate = _AUDIO_OUTPUT_SAMPLE_RATE if audio_enabled else 0
+    audio_channels = _AUDIO_OUTPUT_CHANNELS if audio_enabled else 0
+    audio_max_samples_per_chunk = (
+        max(int(np.ceil(audio_sample_rate / max(fps_float, 1.0) * 4.0)), 2048)
+        if audio_enabled
+        else 0
+    )
     expected_video_interval = 1.0 / max(fps_float, 1.0)
     video_drop_late_threshold = max(
         0.020,
@@ -1802,6 +1838,8 @@ def stream_video(
     )
 
     print(f"Source  : {video_path}")
+    if audio_path != str(video_path):
+        print(f"Audio source: {audio_path}")
     print(f"Size    : {width}x{height} @ {fps_float:.3f} fps ({total_frames} frames)")
     print(
         "Input   : "
@@ -1831,6 +1869,8 @@ def stream_video(
     diagnostics.emit(
         "stream_start",
         video_path=str(video_path),
+        audio_path=str(audio_path),
+        audio_sidecar=bool(audio_path != str(video_path)),
         source_name=str(source_name),
         transport_policy=os.environ.get("NDI_TRANSPORT", "auto"),
         ndi_config_dir=os.environ.get("NDI_CONFIG_DIR", ""),
@@ -1874,13 +1914,13 @@ def stream_video(
     if audio_enabled:
         _configure_audio_frame(
             sender_plain,
-            media_info.audio_sample_rate,
-            media_info.audio_channels,
-            media_info.audio_max_samples_per_chunk,
+            audio_sample_rate,
+            audio_channels,
+            audio_max_samples_per_chunk,
         )
         print(
-            f"Audio   : {media_info.audio_sample_rate} Hz, {media_info.audio_channels} ch, "
-            f"up to {media_info.audio_max_samples_per_chunk} samples/chunk"
+            f"Audio   : {audio_sample_rate} Hz, {audio_channels} ch, "
+            f"up to {audio_max_samples_per_chunk} samples/chunk"
         )
 
         if audio_source_name:
@@ -1898,9 +1938,9 @@ def stream_video(
             )
             _configure_audio_frame(
                 sender_audio,
-                media_info.audio_sample_rate,
-                media_info.audio_channels,
-                media_info.audio_max_samples_per_chunk,
+                audio_sample_rate,
+                audio_channels,
+                audio_max_samples_per_chunk,
             )
             print(f"NDI audio: '{audio_source_name}' (dedicated audio-only source)")
     else:
@@ -1929,9 +1969,9 @@ def stream_video(
         if audio_enabled:
             _configure_audio_frame(
                 sender_overlay,
-                media_info.audio_sample_rate,
-                media_info.audio_channels,
-                media_info.audio_max_samples_per_chunk,
+                audio_sample_rate,
+                audio_channels,
+                audio_max_samples_per_chunk,
             )
 
     print("Press Ctrl-C to stop.\n")
@@ -2027,6 +2067,7 @@ def stream_video(
             audio_thread = threading.Thread(
                 target=_run_audio_sender,
                 args=(
+                    audio_path,
                     video_path,
                     sender_plain,
                     sender_overlay,
@@ -2608,6 +2649,7 @@ if __name__ == "__main__":
     audio_preroll_milliseconds = _DEFAULT_AUDIO_PREROLL_MILLISECONDS
     source_name = "StreamNDI"
     audio_source_name = None
+    audio_file = None
     video_hwaccel = None
 
     if "--video-prefetch-frames" in args:
@@ -2651,6 +2693,14 @@ if __name__ == "__main__":
             raise SystemExit("--audio-source-name requires a name") from exc
         del args[audio_source_name_index:audio_source_name_index + 2]
 
+    if "--audio-file" in args:
+        audio_file_index = args.index("--audio-file")
+        try:
+            audio_file = args[audio_file_index + 1]
+        except IndexError as exc:
+            raise SystemExit("--audio-file requires a path") from exc
+        del args[audio_file_index:audio_file_index + 2]
+
     if "--video-hwaccel" in args:
         video_hwaccel_index = args.index("--video-hwaccel")
         try:
@@ -2683,6 +2733,7 @@ if __name__ == "__main__":
         video,
         source_name=source_name,
         audio_source_name=audio_source_name,
+        audio_file=audio_file,
         dual=dual,
         rx_metadata=rx_metadata,
         rx_metadata_verbose=rx_metadata_verbose,
