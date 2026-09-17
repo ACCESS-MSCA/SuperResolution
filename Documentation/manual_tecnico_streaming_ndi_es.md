@@ -42,6 +42,7 @@ no cambian.
 | `stream_video.py` | Orquestacion runtime | Scheduling, dual output, metadata, cleanup |
 | `media_reader.py` | Reader de media unificado | Loop por pasadas, decode A/V y ordenacion temporal |
 | `ndi_native.py` | Bindings minimos a NDI | Sender directo y capture de metadata |
+| `create_8k_uhd_master.py` | Preparacion offline | HEVC/NV12 7680x4320 y normalizacion AAC opcional |
 | `utils.py` | Helpers visuales y fabrica de sender | Overlay simple y configuracion del sender |
 | `extensions/backchannel/receiver.py` | Canal de vuelta de metadata | Recibe XML desde los receivers |
 | `integrations/unity/` | Integracion Unity | Parsing y estado de viewport |
@@ -123,3 +124,9 @@ La fluidez 8K sostenida en AVP no está cerrada: bajo la LAN medida, la entrega
 full-bandwidth puede caer por debajo de la cadencia aunque sender y audio sigan
 sanos. La siguiente decisión es infraestructura de baja latencia o una arquitectura
 NDI comprimida con licencia; no otro launcher por receptor.
+
+La preparación HEVC/NV12 evita variabilidad innecesaria del master y mantiene
+VideoToolbox, pero no modifica el codec de transporte NDI estándar. En la prueba
+Device del 16/09 el sender produjo aproximadamente 304–320 Mbit/s de salida y
+la recepción siguió llegando por ráfagas. Aumentar el buffer solo puede absorber
+ráfagas acotadas; no reconstruye frames que no llegan al receptor.

@@ -1,6 +1,6 @@
 # Vídeo ideal y optimización del streaming 8K
 
-Actualizado: 2026-09-15
+Actualizado: 2026-09-16
 
 Este documento resume, de forma práctica, cómo preparar un vídeo para esta aplicación y qué se ha hecho para conseguir un streaming NDI 8K más estable.
 
@@ -13,21 +13,22 @@ Para producir material nuevo, utilizar este perfil:
 | Resolución | `7680 × 4320` (8K UHD, relación 16:9) |
 | Escaneo | Progresivo |
 | Cadencia | `24 fps` constantes; `23.976 fps` también es válido |
-| Códec de vídeo | `VP9` |
-| Contenedor | `WebM` |
-| Bitrate orientativo | `30–40 Mbit/s` para una calidad similar al clip probado |
-| Audio | `Opus`, estéreo, `48 kHz` |
+| Códec de vídeo | `HEVC Main`, decodificable por VideoToolbox |
+| Formato de píxel del máster | `yuv420p/NV12` |
+| Contenedor | `MP4` con tag `hvc1` |
+| Bitrate orientativo | `150–160 Mbit/s` para el gate de máxima calidad actual |
+| Audio | `AAC`, estéreo, `48 kHz`, 320 kbit/s |
 | Duración | Preferiblemente clips cortos o medios; hasta unos 11 minutos de audio estéreo puede precargarse con el límite actual de 256 MiB |
 | Timeline | PTS continuos y crecientes, sin saltos, duplicados ni tramos dañados |
 
 La prioridad es combinar una cadencia constante con timestamps correctos. Un archivo con más bitrate no será mejor si obliga al equipo a decodificar tarde o contiene un timeline irregular.
 
-Para la validación de máxima calidad actual se ha creado además un máster HEVC
+Para la validación de máxima calidad actual se ha creado un máster HEVC
 Main `7680 × 4320`, `24000/1001 fps`, AAC 48 kHz y aproximadamente 151,9 Mbit/s.
 Se decodifica mediante VideoToolbox y se entrega a NDI como NV12 4:2:0 sin la
-conversión intermedia a UYVY. Esta es la candidata de aceptación, no todavía un
-perfil promovido: debe pasar de nuevo en Device tras eliminar el receptor 8K
-duplicado que agotaba la memoria del AVP.
+conversión intermedia a UYVY. Esta es la receta de preparación preferida. No
+implica que la red NDI transporte el HEVC: el SDK estándar vuelve a comprimir los
+píxeles decodificados como NDI full-bandwidth.
 
 ### Referencia validada
 
@@ -45,7 +46,22 @@ Sus características reales son:
 - tamaño `540,585,327 bytes`;
 - SHA-1 `fddad96b46d200f79d827c226913539b32307191`.
 
-Este archivo está probado y funciona, pero para nuevas exportaciones es preferible fijar exactamente `24 fps` constantes. La cadencia de `23.836 fps` es una propiedad del original, no un requisito de la aplicación.
+Este archivo está probado y funciona. El diagnóstico del 16/09 confirmó que el
+launcher actual activa VideoToolbox incluso con su VP9, por lo que el códec
+original no explica las pérdidas de recepción AVP. Para uniformar masters se
+genera, sin sustituirlo, `Videos/Prod/Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4`:
+HEVC Main/NV12 a 160 Mbit/s, AAC 48 kHz y la misma cadencia `5959/250`.
+
+```bash
+.venv/bin/python create_8k_uhd_master.py \
+  Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
+  Videos/Prod/Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4 \
+  --fps source --bitrate-mbps 160 --audio-codec aac
+```
+
+El launcher Ghost Town prefiere automáticamente este derivado si existe y cae
+al WebM original si no. Para material nuevo se recomienda 24 o 23,976 fps CFR;
+23,836 fps se conserva aquí para no alterar el montaje temporal del original.
 
 ## 2. Qué debe evitarse
 
@@ -59,7 +75,9 @@ Este archivo está probado y funciona, pero para nuevas exportaciones es preferi
 - BGRA como modo de salida para 8K. El candidato HEVC debe conservar NV12; UYVY
   queda como fallback 4:2:2 y comparación controlada.
 
-Otros formatos que PyAV pueda abrir, como H.264/AAC en MP4, son compatibles, pero deben validarse en la máquina final. El perfil VP9/Opus en WebM es el perfil 8K con evidencia directa en este proyecto.
+Otros formatos que PyAV pueda abrir siguen siendo compatibles, pero deben
+validarse en la máquina final. VP9/Opus conserva evidencia histórica y queda
+como fuente original; HEVC/NV12/AAC es el formato de entrega local preferido.
 
 ## 3. Comprobación mínima antes de usar un vídeo
 
@@ -79,7 +97,10 @@ Para Ghost Towns, iniciar con:
 Launchers/Stream_NDI_Ghost_Towns_8K24.command
 ```
 
-El lanzador usa NV12, cuatro frames de prefetch, precarga de audio cuando es posible y diagnósticos. I420 queda como override de diagnóstico.
+El lanzador usa el derivado HEVC si está disponible, NV12, cuatro frames de
+prefetch, precarga de audio y diagnósticos. I420 queda como override de
+diagnóstico. Cambiar VP9 por HEVC reduce variabilidad del master, no el caudal
+NDI estándar posterior.
 
 Los lanzadores 8K usan por defecto `single-tcp` aislado. En la comparación
 controlada del 15/09/2026, con una build ya corregida a un solo receptor visual,
@@ -88,8 +109,11 @@ saturación; la misma señal con TCP permaneció viva más de tres minutos y man
 el audio estable. `NDI_TRANSPORT=auto` queda como override diagnóstico. TCP evita
 la acumulación mediante backpressure, pero no inventa ancho de banda: la ruta
 Wi-Fi actual sólo entregó aproximadamente 2–5 fps y mostró 3–593 ms de ping
-(102 ms de media). La aceptación 8K exige primero corregir la infraestructura de
-red o aprobar un transporte comprimido distinto de NDI full-bandwidth.
+(102 ms de media). En la ejecución instrumentada del 16/09, el proceso emitió
+aproximadamente 304–320 Mbit/s y la ruta cargada midió 65,719 ms de RTT medio,
+202,045 ms máximo y 43,710 ms de desviación. La aceptación 8K exige corregir la
+infraestructura de red o aprobar un transporte comprimido distinto de NDI
+full-bandwidth.
 
 ## 4. Qué se ha optimizado en el streaming
 

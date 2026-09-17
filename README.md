@@ -105,7 +105,7 @@ not a valid proxy for runtime load or stability.
 | `stream_video.py` | Runtime orchestration, scheduling, dual output, metadata overlay |
 | `media_reader.py` | Unified looping A/V reader built on `PyAV` |
 | `ndi_native.py` | Minimal direct `libndi` sender and metadata capture bindings |
-| `create_8k_uhd_master.py` | Reproducible 8192x4320 H.264 to 7680x4320 HEVC quality-master conversion |
+| `create_8k_uhd_master.py` | Reproducible 8192x4320 or native 7680x4320 source to HEVC/NV12 quality-master conversion; optional AAC normalization |
 | `utils.py` | Sender factory and visual overlay helper |
 | `extensions/backchannel/receiver.py` | Metadata backchannel capture from NDI receivers |
 | `integrations/unity/` | Unity metadata parsing and viewport interpretation |
@@ -224,6 +224,23 @@ The recipe preserves the complete 8192x4320 image by scaling proportionally to
 payloads and timestamps instead of re-encoding audio. The measured output is
 7680x4320 HEVC Main/yuv420p, 24000/1001 fps, about 151.9 Mbit/s video, 300-to-240
 frame conversion and 10.01 seconds.
+
+Ghost Town can be normalized without replacing the LFS-tracked VP9/Opus
+original. Its native 7680x4320 geometry and 5959/250 cadence are preserved;
+only the delivery master changes to HEVC Main/NV12 plus AAC 48 kHz stereo:
+
+```bash
+.venv/bin/python create_8k_uhd_master.py \
+  Videos/Ghost_Towns_in_8K_GoPro_be_Hero.webm \
+  Videos/Prod/Ghost_Towns_8K_UHD_23_836fps_HEVC_AAC.mp4 \
+  --fps source --bitrate-mbps 160 --audio-codec aac
+```
+
+`Stream_NDI_Ghost_Towns_8K24.command` prefers that ignored local derivative
+when present and otherwise falls back to the original. Current diagnostics show
+that VideoToolbox can already decode the VP9 original on this Mac, so the
+derivative standardizes production media and loop behavior; it does not reduce
+full-bandwidth NDI wire traffic because NDI receives the same decoded pixels.
 
 Local sender gates on 15 September 2026:
 

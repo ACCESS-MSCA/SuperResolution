@@ -7,6 +7,7 @@ from create_8k_uhd_master import (
     DEFAULT_PAD_Y,
     DEFAULT_WIDTH,
     _parse_rate,
+    _resolve_geometry,
 )
 
 
@@ -24,6 +25,12 @@ class Create8KUhdMasterTests(unittest.TestCase):
         self.assertEqual(_parse_rate("24000/1001", source_rate), Fraction(24000, 1001))
         with self.assertRaises(ValueError):
             _parse_rate("0", source_rate)
+
+    def test_geometry_accepts_native_uhd_without_rescaling(self):
+        self.assertEqual(_resolve_geometry(8192, 4320), "scale-pad")
+        self.assertEqual(_resolve_geometry(7680, 4320), "native-uhd")
+        with self.assertRaises(RuntimeError):
+            _resolve_geometry(3840, 2160)
 
 
 if __name__ == "__main__":
