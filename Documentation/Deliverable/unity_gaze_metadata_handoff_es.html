@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nota de entrega - Metadata de gaze Unity</title>
+  <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:0;background:#0f172a;color:#e5e7eb}main{max-width:960px;margin:0 auto;padding:40px 24px}a{color:#93c5fd}code,pre{background:#111827;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #334155;padding:8px;text-align:left;vertical-align:top}.card{border:1px solid #334155;background:#111827;border-radius:8px;padding:16px;margin:16px 0}</style>
+</head>
+<body><main>
+  <p>Estado: implementado en el proveedor de metadata Unity y parseado en Python</p>
+  <p>Actualizado: 2026-07-06</p>
+  <h1>Nota de entrega: metadata de gaze Unity para hiper-resolucion</h1>
+  <div class="card">Navegacion: <a href="../index_es.html">Indice de documentacion</a> · <a href="unity_gaze_metadata_handoff_en.html">EN</a> · <a href="unity_gaze_metadata_handoff_es.md">Markdown</a></div>
+  <h2>Proposito</h2>
+  <p>Esta nota explica como el proyecto Python <code>SuperResolution</code> recibe metadata de gaze/viewport desde la build de Unity Simulator entregada. Identifica los puntos de integracion entregados, el contrato de datos y la ruta actual de validacion.</p>
+  <h2>Alcance entregado</h2>
+  <ul><li>Runtime Python de streaming NDI en <code>SuperResolution</code>.</li><li>Sender directo basado en <code>libndi</code>.</li><li>Timeline A/V basado en PyAV.</li><li>Receptor de metadata de vuelta desde Unity.</li><li>Parser de metadata de viewport Unity.</li><li>Overlay debug de ROI/gaze en Python.</li><li>Build de Unity Simulator esperada para conectar a la fuente NDI Python y emitir metadata <code>access_viewport</code>.</li></ul>
+  <p>La entrega no incluye algoritmo de hiper-resolucion de produccion, perfil final de calidad foveated, sincronizacion exacta metadata-a-frame de video ni instalador propio para NDI Runtime/Python.</p>
+  <h2>Ruta de validacion</h2>
+  <ol><li>Instalar y ejecutar Python con <code>Documentation/setup_and_run_es.md</code>.</li><li>Confirmar que <code>StreamNDI</code> aparece en NDI Monitor.</li><li>Lanzar la build de Unity Simulator y conectarla a la fuente Python.</li><li>Ejecutar <code>python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</code>.</li><li>Confirmar lineas <code>[RX Viewport]</code>.</li><li>Leer la ultima metadata parseada desde <code>UnityViewportStateHandler.state.latest</code>.</li><li>Confirmar que <code>viewport.gaze_hit</code> y <code>viewport.gaze_uv</code> llegan poblados.</li></ol>
+  <h2>Contrato principal</h2>
+  <p>Usar <code>Documentation/unity_viewport_metadata_contract_es.md</code> como contrato tecnico de campos.</p>
+  <ul><li><code>schema_version</code>: version del contrato.</li><li><code>sequence</code>: secuencia monotona del payload Unity.</li><li><code>gaze_hit</code>: indica si <code>gaze_uv</code> es valido.</li><li><code>gaze_uv</code>: centro de gaze normalizado en UV de textura/Unity.</li><li><code>uv_projection</code>: modo planar o equirectangular.</li><li><code>uv_polygon</code>: poligono ROI visible.</li><li><code>erp_frustum_valid</code> y <code>erp_corner_directions</code>: geometria ERP/360 del viewport.</li></ul>
+  <pre>x = int(round(u * (width - 1)))
+y = int(round((1.0 - v) * (height - 1)))</pre>
+  <h2>Notas de uso de metadata</h2>
+  <p>La metadata Unity aporta estado de gaze y region visible. No define el algoritmo downstream de procesado de imagen.</p>
+  <ul><li><code>gaze_uv</code> es valido solo cuando <code>gaze_hit</code> es true.</li><li>Los valores UV estan normalizados en <code>[0, 1]</code>.</li><li>El mapeo a espacio frame en NumPy invierte <code>v</code>.</li><li>Radio foveal, falloff, perfil de calidad y politica de fallback estan fuera del contrato de metadata Unity.</li><li><code>uv_polygon</code> describe el limite visible de la superficie en espacio UV.</li><li>Fuentes equirectangulares requieren tratamiento ERP-aware; <code>uv_min/uv_max</code> por si solos pueden ser ambiguos cerca del seam.</li></ul>
+  <h2>Puntos de extension en Python</h2>
+  <ul><li><code>integrations/unity/parsers.py</code>: contrato tipado de metadata.</li><li><code>integrations/unity/handlers.py</code>: ultimo estado de viewport.</li><li><code>stream_video.py</code>: runtime loop actual y overlay debug.</li><li><code>utils.py</code>: helpers simples de frame/overlay.</li></ul>
+  <pre>MediaVideoEvent frame
+    -> ultimo UnityViewportMetadata
+    -> interpretacion opcional gaze/ROI
+    -> procesado downstream opcional de frame
+    -> NativeNdiSender.write_video(...)</pre>
+  <h2>Riesgos y restricciones</h2>
+  <table><thead><tr><th>Riesgo</th><th>Impacto</th><th>Mitigacion</th></tr></thead><tbody><tr><td>Metadata ultimo estado, no frame-locked</td><td>El gaze puede ir ligeramente adelantado/retrasado</td><td>Definir una politica de frescura adecuada al procesado downstream</td></tr><tr><td>Unity no manda radio foveal</td><td>Radio/falloff no forman parte del contrato</td><td>Definir estos parametros en configuracion downstream si hacen falta</td></tr><tr><td>Cruce de seam ERP</td><td>Un bbox UV ingenuo puede envolver mal</td><td>Usar campos ERP-aware del contrato</td></tr><tr><td>Metadata ausente/stale</td><td>El centro de gaze puede ser invalido</td><td>Gate por <code>gaze_hit</code> y edad de metadata</td></tr><tr><td>Builds antiguas sin <code>schema_version</code></td><td>El parser vera version <code>0</code></td><td>Tratar <code>0</code> como legacy y preferir la build Simulator entregada</td></tr></tbody></table>
+  <h2>Checklist de validacion</h2>
+  <ul><li>Las dependencias Python se instalan correctamente.</li><li>El check de NDI imprime una version.</li><li><code>StreamNDI</code> aparece en NDI Monitor.</li><li>La build de Unity Simulator recibe la fuente Python.</li><li>La consola Python muestra <code>[RX Viewport]</code>.</li><li><code>gaze_hit</code> pasa a <code>1</code> cuando se mira la superficie NDI.</li><li><code>gaze_uv</code> cambia al mover vista/cabeza.</li><li>El marcador debug de gaze sigue el centro esperado.</li></ul>
+  <h2>Resumen de handoff</h2>
+  <p>La senal de gaze/viewport ya existe y esta parseada en Python. El objeto tipado <code>UnityViewportMetadata</code> es la superficie de integracion prevista; el XML crudo queda disponible para diagnostico con <code>--rx-metadata-verbose</code>. Radio/falloff, politica de frescura y comportamiento alrededor del seam ERP quedan intencionadamente en el procesado downstream.</p>
+</main></body></html>

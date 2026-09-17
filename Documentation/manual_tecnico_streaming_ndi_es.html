@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manual Técnico - SuperResolution NDI Streaming</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1217;
+      --panel: #171b22;
+      --panel-2: #1d2430;
+      --text: #e8eef7;
+      --muted: #a8b3c5;
+      --accent: #78b7ff;
+      --border: #2a3443;
+      --good: #8fd18b;
+      --warn: #ffd27a;
+    }
+    body { margin: 0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; background: var(--bg); color: var(--text); }
+    main { max-width: 1000px; margin: 0 auto; padding: 40px 24px 72px; }
+    h1, h2, h3 { line-height: 1.2; }
+    h1 { margin-top: 0; font-size: 2.2rem; }
+    h2 { margin-top: 2.4rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+    p, li { color: var(--text); }
+    .muted { color: var(--muted); }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin: 18px 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { background: var(--panel-2); padding: 16px; border-radius: 8px; overflow: auto; border: 1px solid var(--border); }
+    table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--panel-2); }
+    a { color: var(--accent); }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="pill">Actualizado: 2026-09-16</p>
+    <h1>Manual Técnico - SuperResolution NDI Streaming</h1>
+    <p>Este manual describe la implementación actual del streamer NDI en Python. El foco principal de la arquitectura es mantener sincronía A/V estable en sesiones largas, reducir capas opacas y dejar una base clara para extender features como overlays de viewport enviados desde Unity.</p>
+
+    <div class="card">
+      <strong>Navegación</strong>
+      <ul>
+        <li><a href="./index_es.html">Indice de documentacion</a> · <a href="./index_es.md">MD</a></li>
+        <li><a href="./technical_manual_streaming_ndi_en.html">Versión EN</a> · <a href="./manual_tecnico_streaming_ndi_es.md">MD</a></li>
+        <li><a href="./setup_and_run_es.html">Guía de instalación y ejecución</a></li>
+        <li><a href="./unity_viewport_metadata_contract_es.html">Contrato de metadata de viewport Unity</a></li>
+        <li><a href="./Deliverable/unity_gaze_metadata_handoff_es.html">Entrega: metadata de gaze Unity</a></li>
+        <li><a href="./Deliverable/ndi_sender_libndi_decision_es.html">Decisión: sender directo con libndi</a></li>
+        <li><a href="./Deliverable/pyav_media_timeline_decision_es.html">Decisión: timeline único con PyAV</a></li>
+      </ul>
+    </div>
+
+    <h2>1. Resumen ejecutivo</h2>
+    <ul>
+      <li>Entrada principal: <code>stream_video.py</code>.</li>
+      <li>Decode A/V unificado: <code>media_reader.py</code> con <code>PyAV</code>.</li>
+      <li>Sender NDI: <code>ndi_native.py</code> con <code>libndi</code> directo.</li>
+      <li>Procesado de frame y overlays: <code>numpy</code>.</li>
+      <li>Backchannel Unity: metadata NDI recibida y dibujada opcionalmente sobre el vídeo saliente.</li>
+    </ul>
+
+    <h2>2. Arquitectura actual</h2>
+    <pre>CLI -> LoopingMediaReader (PyAV)
+    -> eventos de media ordenados por tiempo (video/audio)
+    -> reloj único de reproducción en stream_video.py
+    -> NativeNdiSender (libndi)
+    -> salida NDI principal
+    -> salida NDI secundaria opcional (--dual)
+    -> overlay opcional con metadata de Unity</pre>
+    <p>La decisión clave es que audio y vídeo salen del mismo timeline de media. El sistema ya no reconstruye audio por ventanas calculadas a partir del frame index de vídeo.</p>
+    <p>Los buffers de salida NV12 se reutilizan en vez de reservar un array 8K completo por frame. El lease sigue vivo durante la propiedad asíncrona de <code>libndi</code> y vuelve al pool tras el siguiente envío o el flush de cierre. En 7680x4320 evita una reserva repetida de unos 47,5 MiB. Los diagnósticos exponen reservas/reutilizaciones; píxeles, clocks, ROI y audio no cambian.</p>
+
+    <h2>3. Componentes principales</h2>
+    <table>
+      <thead><tr><th>Ruta</th><th>Rol</th><th>Notas</th></tr></thead>
+      <tbody>
+        <tr><td><code>stream_video.py</code></td><td>Orquestación runtime</td><td>Scheduling, dual output, metadata, cleanup</td></tr>
+        <tr><td><code>media_reader.py</code></td><td>Reader de media unificado</td><td>Loop por pasadas, decode A/V y ordenación temporal</td></tr>
+        <tr><td><code>ndi_native.py</code></td><td>Bindings mínimos a NDI</td><td>Sender directo y capture de metadata</td></tr>
+        <tr><td><code>utils.py</code></td><td>Helpers visuales y fábrica de sender</td><td>Overlay simple y configuración del sender</td></tr>
+        <tr><td><code>extensions/backchannel/receiver.py</code></td><td>Canal de vuelta de metadata</td><td>Recibe XML desde los receivers</td></tr>
+        <tr><td><code>integrations/unity/</code></td><td>Integración Unity</td><td>Parsing y estado de viewport</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4. Dependencias</h2>
+    <table>
+      <thead><tr><th>Componente</th><th>Estado</th><th>Motivo</th></tr></thead>
+      <tbody>
+        <tr><td><code>numpy==2.3.5</code></td><td>Obligatoria</td><td>Buffers de vídeo/audio y overlays</td></tr>
+        <tr><td><code>av==17.1.0</code></td><td>Obligatoria</td><td>Timeline unificado y decode A/V</td></tr>
+        <tr><td><code>libndi</code></td><td>Obligatoria</td><td>Sender NDI nativo</td></tr>
+        <tr><td><code>cyndilib</code></td><td>Opcional/legacy</td><td>No necesario para streaming; puede ayudar a localizar una libndi bundleada en desarrollo</td></tr>
+        <tr><td><code>ffmpeg</code></td><td>Opcional fuera de runtime</td><td>Útil para preprocesado o launchers auxiliares, no para el camino principal de streaming</td></tr>
+      </tbody>
+    </table>
+
+    <h2>5. Decisiones de diseño activas</h2>
+    <ul>
+      <li><strong>Una sola autoridad de timing:</strong> el reloj de reproducción vive en <code>stream_video.py</code>.</li>
+      <li><strong>Timeline único de media:</strong> <code>PyAV</code> entrega eventos A/V desde el mismo contenedor.</li>
+      <li><strong>Sender directo:</strong> se evita el wrapper de alto nivel para reducir buffering opaco.</li>
+      <li><strong>Extensión por metadata:</strong> el overlay de viewport no redefine el pipeline base, solo lo enriquece.</li>
+    </ul>
+
+    <h2>6. Flujo de ejecución</h2>
+    <ol>
+      <li>Se parsean argumentos CLI.</li>
+      <li><code>LoopingMediaReader</code> abre el media y detecta streams de vídeo y audio.</li>
+      <li>Se configuran sender principal y sender secundario opcional.</li>
+      <li>El runtime recibe eventos de vídeo o audio ya ordenados por tiempo de media.</li>
+      <li>El scheduler espera al deadline correspondiente y envía el frame o bloque de audio.</li>
+      <li>Si hay metadata reciente de Unity, se dibuja sobre el frame de vídeo antes de enviarlo.</li>
+      <li>Al llegar al final del clip, el reader reabre el media y continúa con offset temporal acumulado.</li>
+    </ol>
+
+    <h2>7. Operación</h2>
+    <pre>python3 -m pip install -r requirements.txt
+python3 stream_video.py
+python3 stream_video.py Videos/big_buck_bunny.mp4 --dual
+python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</pre>
+
+    <h2>8. QA recomendado</h2>
+    <p>Matriz ya validada a fecha 2026-06-18:</p>
+    <ul>
+      <li>NDI Monitor</li>
+      <li>Unity Editor</li>
+      <li>Unity AVP Simulator</li>
+      <li>Build en Apple Vision Pro</li>
+    </ul>
+    <p>QA operativo recomendado a partir de aquí:</p>
+    <ol>
+      <li>Validar primero en NDI Monitor.</li>
+      <li>Repetir después en Unity.</li>
+      <li>Probar sesiones largas con señales representativas de producción.</li>
+      <li>Comparar 24/23.976 fps y 60/59.94 fps.</li>
+      <li>Comprobar fuentes con audio, sin audio y cambios de señal si aplican.</li>
+    </ol>
+
+    <h2>9. Troubleshooting</h2>
+    <table>
+      <thead><tr><th>Síntoma</th><th>Área probable</th><th>Acción</th></tr></thead>
+      <tbody>
+        <tr><td>No aparece la fuente NDI</td><td>Runtime NDI o red</td><td>Verificar instalación de <code>libndi</code> y visibilidad en LAN</td></tr>
+        <tr><td>El script falla al arrancar</td><td>Dependencia <code>PyAV</code></td><td>Reinstalar <code>requirements.txt</code></td></tr>
+        <tr><td>Drift A/V largo</td><td>Fuente de origen o scheduler</td><td>Comparar NDI Monitor frente a Unity y revisar logs del sender</td></tr>
+        <tr><td>Vídeo con tirones</td><td>Carga de decode o CPU</td><td>Reducir complejidad de la fuente y revisar avisos de timing</td></tr>
+        <tr><td>No se pinta el viewport</td><td>Backchannel o metadata stale</td><td>Revisar consola Python y emisión de metadata desde Unity</td></tr>
+      </tbody>
+    </table>
+
+    <h2>10. Estado actual</h2>
+    <p>La continuidad y sincronización A/V están cerradas como baseline técnico: todos los launchers comparten single-TCP, preroll cero, timecodes, audio precargado, prefetch, VideoToolbox/NV12 y diagnósticos. El A/B del 16/09 eliminó los glitches del antiguo launcher 1080p.</p>
+    <p>Validación funcional completada en la matriz actual:</p>
+    <ul>
+      <li>NDI Monitor</li>
+      <li>Unity Editor</li>
+      <li>Unity AVP Simulator</li>
+      <li>Build en Apple Vision Pro</li>
+    </ul>
+    <p>La fluidez 8K sostenida en AVP no está cerrada: la entrega full-bandwidth puede caer por debajo de la cadencia bajo la LAN medida. La siguiente decisión es infraestructura de baja latencia o NDI comprimido con licencia, no otro launcher por receptor.</p>
+  </main>
+</body>
+</html>

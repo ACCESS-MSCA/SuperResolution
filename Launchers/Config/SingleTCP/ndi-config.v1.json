@@ -1,0 +1,8 @@
+{
+  "ndi": {
+    "rudp": { "send": { "enable": false } },
+    "tcp": { "send": { "enable": false } },
+    "unicast": { "send": { "enable": false } },
+    "multicast": { "send": { "enable": false } }
+  }
+}

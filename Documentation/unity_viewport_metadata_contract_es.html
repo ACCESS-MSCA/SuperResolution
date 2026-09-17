@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Contrato de metadata de viewport Unity</title>
+  <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:0;background:#0f172a;color:#e5e7eb}main{max-width:1040px;margin:0 auto;padding:40px 24px}a{color:#93c5fd}code,pre{background:#111827;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid #334155;padding:8px;text-align:left;vertical-align:top}.card{border:1px solid #334155;background:#111827;border-radius:8px;padding:16px;margin:16px 0}</style>
+</head>
+<body><main>
+  <p>Actualizado: 2026-07-06</p>
+  <h1>Contrato de metadata de viewport Unity</h1>
+  <div class="card">Navegacion: <a href="index_es.html">Indice</a> · <a href="unity_viewport_metadata_contract_en.html">EN</a> · <a href="unity_viewport_metadata_contract_es.md">Markdown</a></div>
+  <p>Este documento define la metadata emitida por la build de Unity entregada para reportar la region NDI visible y el centro de gaze de vuelta al streamer Python.</p>
+  <h2>Alcance</h2>
+  <p>Unity emite un elemento XML de metadata NDI llamado <code>access_viewport</code>. Python lo recibe por el backchannel del sender NDI y lo parsea a <code>UnityViewportMetadata</code>.</p>
+  <ul><li>Productor Unity: <code>NdiHeadViewportMetadataPayloadProvider</code></li><li>Receptor Python: <code>extensions/backchannel/receiver.py</code></li><li>Parser Python: <code>integrations/unity/parsers.py</code></li><li>Holder de estado runtime: <code>integrations/unity/handlers.py</code></li><li>Consumidor de overlay debug: <code>stream_video.py</code></li></ul>
+  <h2>Superficie de integracion</h2>
+  <p>La superficie de integracion prevista en Python es el objeto tipado devuelto por <code>try_parse_unity_viewport(...)</code> y guardado en <code>UnityViewportStateHandler.state.latest</code>.</p>
+  <ul><li><code>gaze_uv</code> es valido solo cuando <code>gaze_hit</code> es true.</li><li>Los valores UV son floats normalizados en <code>[0, 1]</code>.</li><li>El origen UV de Unity/textura es abajo-izquierda.</li><li>El origen de frame NumPy es arriba-izquierda, por lo que <code>v</code> se invierte al mapear a pixeles.</li><li><code>uv_min/uv_max</code> no basta por si solo para casos ERP que cruzan el seam.</li></ul>
+  <pre>pixel_x = int(round(u * (frame_width - 1)))
+pixel_y = int(round((1.0 - v) * (frame_height - 1)))</pre>
+  <h2>Flujo de metadata</h2>
+  <pre>Unity head/camera + collider de superficie NDI
+    -> XML access_viewport
+    -> backchannel NDI de metadata
+    -> NdiSenderBackchannelReceiver
+    -> try_parse_unity_viewport(...)
+    -> UnityViewportMetadata</pre>
+  <h2>Ejemplo XML</h2>
+  <pre>&lt;access_viewport
+  schema_version="1"
+  id="unity_receiver"
+  seq="42"
+  timestamp="123.456789"
+  scene="NDI"
+  camera="Main Camera"
+  cam_px_w="1920"
+  cam_px_h="1080"
+  hit_any="1"
+  hit_center="1"
+  gaze_hit="1"
+  plane_intersection="1"
+  uv_poly_n="4"
+  uv_projection="MeshTextureCoordinates"
+  uv_cx="0.500"
+  uv_cy="0.500"
+  gaze_uv_x="0.500"
+  gaze_uv_y="0.500"
+  uv_min_x="0.250"
+  uv_min_y="0.250"
+  uv_max_x="0.750"
+  uv_max_y="0.750"
+  uv_poly0_x="0.250"
+  uv_poly0_y="0.250"
+  uv_poly1_x="0.250"
+  uv_poly1_y="0.750"
+  uv_poly2_x="0.750"
+  uv_poly2_y="0.750"
+  uv_poly3_x="0.750"
+  uv_poly3_y="0.250" /&gt;</pre>
+  <p>El payload real puede incluir atributos adicionales, especialmente puntos world y datos de frustum equirectangular.</p>
+  <h2>Sistema de coordenadas</h2>
+  <ul><li><code>u = 0</code>: borde izquierdo de la imagen fuente.</li><li><code>u = 1</code>: borde derecho.</li><li><code>v = 0</code>: borde inferior en UV de Unity/textura.</li><li><code>v = 1</code>: borde superior en UV de Unity/textura.</li></ul>
+  <p>Aplicar clamp de UVs a <code>[0, 1]</code> antes de indexar un frame.</p>
+  <h2>Tipo Python parseado</h2>
+  <pre>@dataclass(frozen=True)
+class UnityViewportMetadata:
+    schema_version: int
+    source_id: str
+    sequence: int
+    scene: str
+    camera: str
+    uv_projection: str
+    hit_any: bool
+    plane_intersection: bool
+    hit_center: bool
+    gaze_hit: bool
+    corner_hits: int
+    contains_north_pole: bool
+    contains_south_pole: bool
+    erp_frustum_valid: bool
+    erp_edge_normals: tuple[tuple[float, float, float], ...]
+    erp_corner_directions: tuple[tuple[float, float, float], ...]
+    uv_center: tuple[float, float]
+    gaze_uv: tuple[float, float]
+    gaze_world: tuple[float, float, float]
+    uv_min: tuple[float, float]
+    uv_max: tuple[float, float]
+    uv_corners: tuple[tuple[float, float], ...]
+    uv_corner_direct_hits: tuple[bool, bool, bool, bool]
+    uv_polygon: tuple[tuple[float, float], ...]</pre>
+  <h2>Referencia de campos</h2>
+  <table><thead><tr><th>Campo</th><th>Tipo</th><th>Significado</th><th>Notas</th></tr></thead><tbody>
+    <tr><td><code>schema_version</code></td><td>int</td><td>Version del contrato. Actual: <code>1</code>.</td><td><code>0</code> significa legacy/sin version explicita.</td></tr>
+    <tr><td><code>source_id</code></td><td>str</td><td>Id de fuente de metadata en Unity.</td><td>Diagnostico.</td></tr>
+    <tr><td><code>sequence</code></td><td>int</td><td>Secuencia monotona del payload Unity.</td><td>Util para detectar repetidos/stale.</td></tr>
+    <tr><td><code>scene</code></td><td>str</td><td>Escena Unity con la superficie NDI.</td><td>Diagnostico.</td></tr>
+    <tr><td><code>camera</code></td><td>str</td><td>Camara Unity usada para proyeccion.</td><td>Diagnostico.</td></tr>
+    <tr><td><code>uv_projection</code></td><td>str</td><td>Modo planar o equirectangular.</td><td>Determina interpretacion planar vs ERP.</td></tr>
+    <tr><td><code>hit_any</code></td><td>bool</td><td>Al menos un ray del viewport golpeo la superficie.</td><td>Confianza diagnostica.</td></tr>
+    <tr><td><code>plane_intersection</code></td><td>bool</td><td>Existe poligono ROI visible.</td><td>Gate para uso de poligono.</td></tr>
+    <tr><td><code>hit_center</code></td><td>bool</td><td>El ray central golpeo la superficie.</td><td>Fuente actual de validez de gaze.</td></tr>
+    <tr><td><code>gaze_hit</code></td><td>bool</td><td><code>gaze_uv</code> es valido.</td><td>Gate de validez para <code>gaze_uv</code>.</td></tr>
+    <tr><td><code>corner_hits</code></td><td>int</td><td>Numero de esquinas con hit directo.</td><td>Confianza/debug.</td></tr>
+    <tr><td><code>contains_north_pole</code></td><td>bool</td><td>Viewport ERP contiene polo norte.</td><td>Manejo de poligono ERP.</td></tr>
+    <tr><td><code>contains_south_pole</code></td><td>bool</td><td>Viewport ERP contiene polo sur.</td><td>Manejo de poligono ERP.</td></tr>
+    <tr><td><code>erp_frustum_valid</code></td><td>bool</td><td>Datos de direccion ERP validos.</td><td>Reconstruccion ERP.</td></tr>
+    <tr><td><code>erp_edge_normals</code></td><td>4x vec3</td><td>Normales de bordes great-circle.</td><td>Containment ERP avanzado.</td></tr>
+    <tr><td><code>erp_corner_directions</code></td><td>4x vec3</td><td>Direcciones de esquinas ERP.</td><td>Geometria de frustum ERP.</td></tr>
+    <tr><td><code>uv_center</code></td><td>vec2</td><td>Centro/centroide del ROI UV visible.</td><td>Centro fallback/diagnostico.</td></tr>
+    <tr><td><code>gaze_uv</code></td><td>vec2</td><td>UV directo del centro de gaze.</td><td>Valido solo cuando <code>gaze_hit</code> es true.</td></tr>
+    <tr><td><code>gaze_world</code></td><td>vec3</td><td>Punto world del hit central.</td><td>Diagnostico 3D opcional.</td></tr>
+    <tr><td><code>uv_min</code>/<code>uv_max</code></td><td>vec2</td><td>BBox UV axis-aligned.</td><td>Bounds planares simples, no representacion ERP unica.</td></tr>
+    <tr><td><code>uv_corners</code></td><td>4x vec2</td><td>Esquinas en orden BL, TL, TR, BR.</td><td>Reconstruccion debug/legacy.</td></tr>
+    <tr><td><code>uv_corner_direct_hits</code></td><td>4 bools</td><td>Si cada esquina fue hit directo.</td><td>Confianza/debug.</td></tr>
+    <tr><td><code>uv_polygon</code></td><td>N vec2</td><td>Poligono visible clipeado.</td><td>Limite visible en espacio UV.</td></tr>
+  </tbody></table>
+  <h2>Notas ERP/equirectangular</h2>
+  <ul><li><code>uv_min/uv_max</code> puede ser enganoso cuando el viewport cruza el seam horizontal.</li><li><code>uv_polygon</code>, flags de polos y <code>erp_corner_directions</code> aportan geometria ERP-aware emitida por Unity.</li><li><code>gaze_uv</code> sigue dependiendo de <code>gaze_hit</code>.</li></ul>
+  <h2>Frescura y timing</h2>
+  <p>La metadata Unity se entrega como ultimo estado de control, no como metadata exacta por frame de video. El overlay debug actual usa <code>viewport_stale_timeout_seconds = 3.0</code>. Procesado sensible a latencia puede definir su propia politica de frescura.</p>
+  <h2>Reglas de compatibilidad</h2>
+  <ul><li>Ignorar atributos XML desconocidos.</li><li>Tolerar atributos opcionales ausentes.</li><li>Tratar <code>schema_version == 1</code> como actual.</li><li>Tratar <code>schema_version == 0</code> como legacy/sin version explicita.</li><li>Tratar <code>gaze_uv</code> como valido solo cuando <code>gaze_hit</code> es true.</li></ul>
+  <h2>Limites conocidos</h2>
+  <ul><li>Unity no envia radio foveal, falloff ni parametros de calidad SR.</li><li>Python contiene actualmente un overlay debug, no un paso de procesado SR de produccion.</li><li>El manejo de seam ERP pertenece al procesado downstream en espacio imagen.</li></ul>
+</main></body></html>

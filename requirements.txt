@@ -1,3 +1,2 @@
-cyndilib
-numpy
-PyQt5
+numpy==2.3.5
+av==17.1.0

@@ -1,7 +1,12 @@
 __pycache__/
+.venv/
+.tools/
+Logs/
 *.pyc
 *.pyo
 .idea/
 *.mp4
+Videos/Prod/*.m4a
 *.md
+!Documentation/**/*.md
 .DS_Store

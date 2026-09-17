@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Delivery Note - Unity Gaze Metadata</title>
+  <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.55;margin:0;background:#0f172a;color:#e5e7eb}main{max-width:960px;margin:0 auto;padding:40px 24px}a{color:#93c5fd}code,pre{background:#111827;border-radius:6px}code{padding:2px 5px}pre{padding:14px;overflow:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #334155;padding:8px;text-align:left;vertical-align:top}.card{border:1px solid #334155;background:#111827;border-radius:8px;padding:16px;margin:16px 0}</style>
+</head>
+<body><main>
+  <p>Status: implemented in Unity metadata provider and parsed in Python</p>
+  <p>Updated: 2026-07-06</p>
+  <h1>Delivery Note: Unity Gaze Metadata for Hyper-Resolution</h1>
+  <div class="card">Navigation: <a href="../index_en.html">Documentation index</a> · <a href="unity_gaze_metadata_handoff_es.html">ES</a> · <a href="unity_gaze_metadata_handoff_en.md">Markdown</a></div>
+  <h2>Purpose</h2>
+  <p>This delivery note explains how the Python <code>SuperResolution</code> project receives gaze/viewport metadata from the supplied Unity Simulator build. It identifies the delivered integration points, the data contract, and the current validation path.</p>
+  <h2>Delivered Scope</h2>
+  <ul><li>Python NDI streaming runtime in <code>SuperResolution</code>.</li><li>Direct <code>libndi</code> sender implementation.</li><li>PyAV-based A/V media timeline.</li><li>Unity metadata backchannel receiver.</li><li>Unity viewport metadata parser.</li><li>Debug ROI/gaze overlay in Python.</li><li>Unity Simulator build expected to connect to the Python NDI source and emit <code>access_viewport</code> metadata.</li></ul>
+  <p>The delivery does not include a production hyper-resolution algorithm, final foveated quality profile, per-video-frame metadata synchronization, or a custom installer for NDI Runtime/Python.</p>
+  <h2>Validation Path</h2>
+  <ol><li>Install and run Python using <code>Documentation/setup_and_run_en.md</code>.</li><li>Confirm <code>StreamNDI</code> appears in NDI Monitor.</li><li>Launch the Unity Simulator build and connect it to the Python NDI source.</li><li>Run <code>python3 stream_video.py Videos/big_buck_bunny.mp4 --rx-metadata-verbose</code>.</li><li>Confirm <code>[RX Viewport]</code> lines appear.</li><li>Read latest parsed metadata from <code>UnityViewportStateHandler.state.latest</code>.</li><li>Confirm <code>viewport.gaze_hit</code> and <code>viewport.gaze_uv</code> are populated.</li></ol>
+  <h2>Main Contract</h2>
+  <p>Use <code>Documentation/unity_viewport_metadata_contract_en.md</code> as the field-level contract.</p>
+  <ul><li><code>schema_version</code>: current contract version.</li><li><code>sequence</code>: monotonic Unity payload sequence.</li><li><code>gaze_hit</code>: whether <code>gaze_uv</code> is valid.</li><li><code>gaze_uv</code>: normalized gaze center in Unity/texture UV space.</li><li><code>uv_projection</code>: planar vs equirectangular projection mode.</li><li><code>uv_polygon</code>: visible surface ROI polygon.</li><li><code>erp_frustum_valid</code> and <code>erp_corner_directions</code>: ERP/360 viewport geometry.</li></ul>
+  <pre>x = int(round(u * (width - 1)))
+y = int(round((1.0 - v) * (height - 1)))</pre>
+  <h2>Metadata Usage Notes</h2>
+  <p>The Unity metadata provides gaze and visible-region state. It does not define the downstream image-processing algorithm.</p>
+  <ul><li><code>gaze_uv</code> is valid only when <code>gaze_hit</code> is true.</li><li>UV values are normalized in <code>[0, 1]</code>.</li><li>Frame-space mapping in NumPy inverts <code>v</code>.</li><li>Foveal radius, falloff, quality profile, and fallback policy are outside the Unity metadata contract.</li><li><code>uv_polygon</code> describes the visible surface boundary in UV space.</li><li>Equirectangular sources require ERP-aware handling; <code>uv_min/uv_max</code> alone can be ambiguous around the seam.</li></ul>
+  <h2>Python Extension Points</h2>
+  <ul><li><code>integrations/unity/parsers.py</code>: typed metadata contract.</li><li><code>integrations/unity/handlers.py</code>: latest viewport state.</li><li><code>stream_video.py</code>: current runtime loop and debug overlay.</li><li><code>utils.py</code>: simple frame overlay helpers.</li></ul>
+  <pre>MediaVideoEvent frame
+    -> latest UnityViewportMetadata
+    -> optional gaze/ROI interpretation
+    -> optional downstream frame processing
+    -> NativeNdiSender.write_video(...)</pre>
+  <h2>Risks and Constraints</h2>
+  <table><thead><tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead><tbody><tr><td>Metadata is latest-state, not frame-locked</td><td>Gaze may be slightly ahead/behind video frame processing</td><td>Define a freshness policy appropriate to downstream processing</td></tr><tr><td>No foveal radius in Unity payload</td><td>Radius/falloff are not part of the metadata contract</td><td>Define these in downstream configuration if needed</td></tr><tr><td>ERP seam crossing</td><td>Naive bbox ROI can wrap incorrectly</td><td>Use ERP-aware fields from the metadata contract</td></tr><tr><td>Missing/stale metadata</td><td>Gaze center may be invalid</td><td>Gate on <code>gaze_hit</code> and metadata age</td></tr><tr><td>Older Unity builds may lack <code>schema_version</code></td><td>Parser sees version <code>0</code></td><td>Treat <code>0</code> as legacy and prefer the delivered simulator build</td></tr></tbody></table>
+  <h2>Validation Checklist</h2>
+  <ul><li>Python dependencies install successfully.</li><li>NDI runtime visibility check prints a version.</li><li><code>StreamNDI</code> appears in NDI Monitor.</li><li>Unity Simulator build receives the Python source.</li><li>Python console shows <code>[RX Viewport]</code>.</li><li><code>gaze_hit</code> becomes <code>1</code> when looking at the NDI surface.</li><li><code>gaze_uv</code> changes as the view/head moves.</li><li>Debug overlay gaze marker follows the expected center.</li></ul>
+  <h2>Handoff Summary</h2>
+  <p>The gaze/viewport signal is present and parsed in Python. The typed <code>UnityViewportMetadata</code> object is the intended integration surface; raw XML remains available for diagnostics via <code>--rx-metadata-verbose</code>. Radius/falloff, metadata freshness policy, and ERP seam behavior are intentionally left to downstream processing.</p>
+</main></body></html>
