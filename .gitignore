@@ -10,3 +10,5 @@ Videos/Prod/*.m4a
 *.md
 !Documentation/**/*.md
 .DS_Store
+/PatchlabData/
+/PatchlabExports/

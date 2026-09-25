@@ -19,6 +19,9 @@ AVP LAN path, not accumulated audio drift or a receiver-specific sender profile.
 
 ## Delivery Quick Start
 
+Patchlab development has a separate [one-pass study adapter](Documentation/patchlab_study.md).
+It does not replace the established looping audiovisual sender described below.
+
 For first-time setup and validation:
 
 1. Follow `Documentation/setup_and_run_en.md` to install Python dependencies, validate `libndi`, and run the streamer.
