@@ -43,6 +43,15 @@ class StudyTests(unittest.TestCase):
     def test_catalog_mismatch_fails_before_media_open(self):
         self.command('prepare',trial={**TRIAL,'clip':{**CLIP,'sha256':'1'*64}})
         self.assertEqual(self.out[-1]['status'],'failed');self.assertIsNone(self.engine.media)
+    def test_selected_2k_rendition_is_sent_without_changing_source_identity(self):
+        rendition=dict(mode='ndi',resolution='2k',filename='_renditions/clip_test/2k.mp4',
+                       sha256='1'*64,width=2048,height=1152,fps_rational='25')
+        with patch('apps.patchlab.study_sender.inspect_clip',return_value={**CLIP,**rendition, 'has_audio':False}):
+            self.command('prepare',trial={**TRIAL,'media':rendition})
+            self.assertEqual(self.out[-1]['status'],'completed')
+            self.assertEqual(self.engine.media.index,0)
+            self.command('play',trial={**TRIAL,'media':rendition})
+            self.assertIn('video_id="clip_test"',self.engine.media.sent[0][1])
     def test_no_silent_audio_discard(self):
         with patch('apps.patchlab.study_sender.inspect_clip',return_value={**CLIP,'has_audio':True}):self.command('prepare')
         self.assertEqual(self.out[-1]['status'],'failed')

@@ -60,13 +60,18 @@ class StudyEngine:
                 if self.state not in ('Idle', 'Completed', 'Aborted'):
                     raise ValueError('Previous trial is not closed')
                 clip = incoming['clip']
-                path = (self.directory / clip['filename']).resolve()
-                if path.parent != self.directory:
+                rendition = incoming.get('media') or clip
+                if rendition.get('mode', 'ndi') != 'ndi':
+                    raise ValueError('The NDI sender only accepts NDI trials')
+                path = (self.directory / rendition['filename']).resolve()
+                if not path.is_relative_to(self.directory) or path == self.directory:
                     raise ValueError('Clip outside catalog directory')
                 actual = inspect_clip(path)
-                for field in ('video_id', 'sha256', 'width', 'height', 'fps_rational'):
-                    if actual[field] != clip[field]:
-                        raise ValueError('Catalog does not match original file')
+                for field in ('sha256', 'width', 'height', 'fps_rational'):
+                    if actual[field] != rendition[field]:
+                        raise ValueError('Rendition does not match selected file')
+                if rendition is clip and actual['video_id'] != clip['video_id']:
+                    raise ValueError('Catalog does not match original file')
                 if actual['has_audio']:
                     raise ValueError('This study adapter currently supports the supplied silent clips only')
                 self.trial = incoming
@@ -158,7 +163,9 @@ class StudyEngine:
                        pts_s=self.last_frame['pts_s'] if self.last_frame else -1,
                        frames_sent=self.content_frames_sent,
                        clip_duration_s=clip.get('duration_s', 0),
-                       video_id=clip.get('video_id'))
+                       video_id=clip.get('video_id'),
+                       media_mode=self.trial.get('media', {}).get('mode', 'ndi'),
+                       resolution=self.trial.get('media', {}).get('resolution', 'native'))
         if self.trial: payload.update(self.identity())
         self.emit(dict(version=1, type='telemetry', payload=payload))
 
