@@ -37,7 +37,7 @@ class StudyEngine:
         self.media = self.trial = None
         self.state = 'Idle'
         self.results = OrderedDict()
-        self.next_frame = None
+        self.next_frame = self.first_frame = None
         self.anchor = self.pause_started = 0.0
         self.last_frame_id = -1
         self.last_frame = None
@@ -76,21 +76,30 @@ class StudyEngine:
                     raise ValueError('This study adapter currently supports the supplied silent clips only')
                 self.trial = incoming
                 self.media = self.media_factory(path, actual)
-                self.next_frame = None
+                self.next_frame = self.media.next_frame()
+                if self.next_frame is None:
+                    raise ValueError('Empty video')
+                self.first_frame, self.next_frame = self.next_frame, None
                 self.last_frame_id = -1
                 self.last_frame = None
                 self.content_frames_sent = 0
                 self.state = 'Ready'
+                self.send_frame(self.first_frame, terminal_hold=True)
+                self.next_hold = self.clock() + 1.0 / float(Fraction(self.trial['clip']['fps_rational']))
             else:
                 if not incoming or not self.trial or any(incoming[k] != self.trial[k] for k in ('trial_id','stream_epoch')):
                     raise ValueError('Stale trial or epoch')
-                if phase == 'play' and self.state == 'Ready':
-                    self.next_frame = self.media.next_frame()
-                    if self.next_frame is None:
-                        raise ValueError('Empty video')
-                    self.anchor = self.clock() - self.next_frame['pts_s']
+                if phase == 'prime' and self.state == 'Ready':
+                    self.state = 'Armed'
+                    self.send_frame(self.first_frame)
+                    self.last_frame_id = self.first_frame['frame_id']
+                    self.last_frame = self.first_frame
+                    self.next_hold = self.clock() + 1.0 / float(Fraction(self.trial['clip']['fps_rational']))
+                elif phase == 'advance' and self.state == 'Armed':
+                    # Unity has presented and sampled frame zero. Only now may
+                    # the source PTS advance, so no clip onset is lost in NDI.
+                    self.anchor = self.clock() - self.first_frame['pts_s']
                     self.state = 'Playing'
-                    self.tick()  # ACK after first send, not after merely receiving Play.
                 elif phase == 'pause' and self.state in ('Playing', 'Ended'):
                     self.pause_started = self.clock()
                     if self.state != 'Ended': self.state = 'Paused'
@@ -99,7 +108,7 @@ class StudyEngine:
                     self.state = 'Playing'
                 elif phase in ('release','finish','abort'):
                     if self.media: self.media.close()
-                    self.media = self.next_frame = self.last_frame = None
+                    self.media = self.next_frame = self.first_frame = self.last_frame = None
                     self.state = 'Aborted' if phase == 'abort' else 'Completed'
                 else:
                     raise ValueError('Invalid sender lifecycle transition')
@@ -107,7 +116,7 @@ class StudyEngine:
                           status='completed', **self.identity())
         except Exception as exc:
             if self.media: self.media.close()
-            self.media = self.next_frame = None
+            self.media = self.next_frame = self.first_frame = None
             self.state = 'Aborted'
             result = dict(version=1, type='ack', command_id=key[0], phase=phase,
                           status='failed', error=str(exc),
@@ -119,6 +128,12 @@ class StudyEngine:
 
     def tick(self):
         self.emit_telemetry()
+        if self.state in ('Ready', 'Armed'):
+            if self.clock() >= self.next_hold:
+                self.send_frame(self.first_frame, terminal_hold=self.state == 'Ready',
+                                count_content=False)
+                self.next_hold = self.clock() + 1.0 / float(Fraction(self.trial['clip']['fps_rational']))
+            return
         if self.state == 'Ended':
             if self.clock() >= self.hold_until:
                 self.close()
@@ -144,14 +159,14 @@ class StudyEngine:
         self.last_frame = frame
         self.next_frame = None
 
-    def send_frame(self, frame, terminal_hold=False):
+    def send_frame(self, frame, terminal_hold=False, count_content=True):
         # Same content frame/PTS, explicitly marked transport tail. Not a loop.
         attrs = dict(schema_version='1', **self.identity(), terminal_hold='1' if terminal_hold else '0',
                      video_id=self.trial['clip']['video_id'],
                      frame_id=str(frame['frame_id']), pts_s=format(frame['pts_s'], '.9f'))
         metadata = tostring(Element('access_study_frame', attrs), encoding='unicode')
         self.media.send(frame, metadata)
-        if not terminal_hold: self.content_frames_sent += 1
+        if not terminal_hold and count_content: self.content_frames_sent += 1
 
     def emit_telemetry(self):
         if not self.trial: return
@@ -171,7 +186,7 @@ class StudyEngine:
 
     def close(self):
         if self.media: self.media.close()
-        self.media = self.next_frame = self.last_frame = None
+        self.media = self.next_frame = self.first_frame = self.last_frame = None
         self.state = 'Aborted'
 
 

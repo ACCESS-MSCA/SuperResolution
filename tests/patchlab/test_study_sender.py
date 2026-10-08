@@ -27,7 +27,7 @@ class StudyTests(unittest.TestCase):
         self.engine.command(dict(version=1,type='command',command_id=id or phase,phase=phase,trial=trial))
     def test_once_and_deduplicated_play(self):
         self.command('prepare');media=self.engine.media
-        self.command('play');self.command('play')
+        self.command('prime');self.command('prime');self.command('advance')
         self.now=.04;self.engine.tick();self.now=.08;self.engine.tick();self.engine.tick()
         for _ in range(10):self.engine.tick()
         content=[entry for entry in media.sent if 'terminal_hold="0"' in entry[1]]
@@ -36,10 +36,10 @@ class StudyTests(unittest.TestCase):
         self.assertIn('frame_id="2"',media.sent[-1][1])
         self.assertEqual(self.engine.state,'Ended')
     def test_pause_preserves_media_clock(self):
-        self.command('prepare');self.command('play');self.command('pause')
-        self.now=10;self.engine.tick();self.assertEqual(len(self.engine.media.sent),1)
-        self.command('resume');self.engine.tick();self.assertEqual(len(self.engine.media.sent),1)
-        self.now=10.05;self.engine.tick();self.assertEqual(len(self.engine.media.sent),2)
+        self.command('prepare');self.command('prime');self.command('advance');self.command('pause')
+        self.now=10;self.engine.tick();self.assertEqual(len(self.engine.media.sent),2)
+        self.command('resume');self.engine.tick();self.assertEqual(len(self.engine.media.sent),2)
+        self.now=10.05;self.engine.tick();self.assertEqual(len(self.engine.media.sent),3)
     def test_catalog_mismatch_fails_before_media_open(self):
         self.command('prepare',trial={**TRIAL,'clip':{**CLIP,'sha256':'1'*64}})
         self.assertEqual(self.out[-1]['status'],'failed');self.assertIsNone(self.engine.media)
@@ -49,8 +49,8 @@ class StudyTests(unittest.TestCase):
         with patch('apps.patchlab.study_sender.inspect_clip',return_value={**CLIP,**rendition, 'has_audio':False}):
             self.command('prepare',trial={**TRIAL,'media':rendition})
             self.assertEqual(self.out[-1]['status'],'completed')
-            self.assertEqual(self.engine.media.index,0)
-            self.command('play',trial={**TRIAL,'media':rendition})
+            self.assertEqual(self.engine.media.index,1)
+            self.command('prime',trial={**TRIAL,'media':rendition})
             self.assertIn('video_id="clip_test"',self.engine.media.sent[0][1])
     def test_no_silent_audio_discard(self):
         with patch('apps.patchlab.study_sender.inspect_clip',return_value={**CLIP,'has_audio':True}):self.command('prepare')
@@ -59,11 +59,24 @@ class StudyTests(unittest.TestCase):
         self.command('prepare',trial={**TRIAL,'clip':{**CLIP,'filename':'../private.mp4'}})
         self.assertEqual(self.out[-1]['status'],'failed')
     def test_abort_closes_sender_and_late_play_cannot_restart(self):
-        self.command('prepare');media=self.engine.media;self.command('abort');self.command('play')
+        self.command('prepare');media=self.engine.media;self.command('abort');self.command('prime')
         self.assertTrue(media.closed);self.assertEqual(self.out[-1]['status'],'failed')
 
+    def test_first_frame_is_held_until_unity_confirms_capture(self):
+        self.command('prepare');media=self.engine.media
+        self.assertIn('frame_id="0"',media.sent[-1][1])
+        self.assertIn('terminal_hold="1"',media.sent[-1][1])
+        self.now=2;self.engine.tick();self.assertEqual(media.index,1)
+        self.command('prime')
+        self.assertIn('terminal_hold="0"',media.sent[-1][1])
+        self.now=4;self.engine.tick();self.assertEqual(media.index,1)
+        self.assertTrue(all(frame['frame_id']==0 for frame,_ in media.sent))
+        self.command('advance')
+        self.now=4.04;self.engine.tick()
+        self.assertEqual(media.sent[-1][0]['frame_id'],1)
+
     def end_clip(self):
-        self.command('prepare');media=self.engine.media;self.command('play')
+        self.command('prepare');media=self.engine.media;self.command('prime');self.command('advance')
         self.now=.04;self.engine.tick();self.now=.08;self.engine.tick();self.engine.tick()
         return media
 
@@ -88,14 +101,14 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(len(media.sent),count)
 
     def test_bounded_telemetry_reports_sender_progress_without_changing_media(self):
-        self.command('prepare');self.command('play');self.now=.04;self.engine.tick()
+        self.command('prepare');self.command('prime');self.command('advance');self.now=.04;self.engine.tick()
         telemetry=[m for m in self.out if m['type']=='telemetry']
         self.assertEqual(len(telemetry),1)
         self.assertEqual(telemetry[0]['payload']['sender_state'],'Playing')
-        self.assertEqual(telemetry[0]['payload']['frame_id'],-1)
+        self.assertEqual(telemetry[0]['payload']['frame_id'],0)
         for _ in range(100): self.engine.tick()
         self.assertEqual(sum(m['type']=='telemetry' for m in self.out),1)
-        self.now=.51;self.engine.tick()
+        self.now=.55;self.engine.tick()
         self.assertEqual(sum(m['type']=='telemetry' for m in self.out),2)
 
 class PackedVideoTests(unittest.TestCase):
