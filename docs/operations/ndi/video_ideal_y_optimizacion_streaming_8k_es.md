@@ -71,6 +71,38 @@ NDI sigue publicando una sola fuente combinada y una sola timeline. Para materia
 nuevo se recomienda 24 o 23,976 fps CFR;
 23,836 fps se conserva aquí para no alterar el montaje temporal del original.
 
+## Generador de calibración de Harris — actualización 13/10/2026
+
+`apps/patchlab/calibration_clip.py` genera directamente HEVC Main, MP4/hvc1,
+8-bit 4:2:0 a 7680×4320, con 160 Mb/s solicitados. En macOS usa VideoToolbox;
+en otros sistemas, libx265. No cambia silenciosamente a H.264 ni sobrescribe
+vídeos o sidecars existentes. La salida valida todos los frames y sus PTS,
+codec/perfil, formato, dimensiones y cadencia; el JSON guarda el hash y el
+bitrate realmente medido, distinto del solicitado.
+
+Se conservan **30 fps, 1.430 frames y 47,6667 s** del protocolo de calibración.
+La recomendación general de 24/23,976 fps no justifica cambiar la trayectoria
+del estudio. Este vídeo permanece sin audio. Sus originales y las identidades
+de G001/G002 siguen intactos; incorporar la nueva salida al catálogo y a las
+builds es una operación posterior, no automática.
+
+```bash
+.venv/bin/python -m apps.patchlab.calibration_clip \
+  --output media/patchlab/calibration/patchlab_calibration_8k30_hevc.mp4
+```
+
+Para ejecución portátil: añadir `--encoder libx265`. `--bitrate-mbps` permite
+ajustar el objetivo, pero siempre hay que comprobar el bitrate medido y probar
+recepción NDI/AVP antes de aceptar rendimiento de producción.
+
+Validación completa del 13/10: salida independiente
+`media/patchlab/calibration/validation_20261013/patchlab_calibration_8k30_hevc_160.mp4`,
+HEVC Main/hvc1/yuv420p, 8K30, 158,324499 Mb/s medidos, 1.430 frames y
+47,6667 s. Todos los frames se decodificaron mediante VideoToolbox sin fallback;
+los PTS son CFR y el JSON de trayectoria coincide exactamente con el original.
+Los 17 tests Patchlab pasaron. Esto valida generación/decodificación en Mac,
+no sustituye una prueba sostenida de recepción NDI y reproducción en AVP.
+
 ## 2. Qué debe evitarse
 
 - Resolución superior a `7680 × 4320`: aumenta coste sin aportar resolución útil al perfil 8K.

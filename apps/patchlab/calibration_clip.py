@@ -10,6 +10,12 @@ jump, shrinking back over ARRIVAL_S to pull the eye to its centre. Positions are
 the frame, so the angular amplitude scales with the screen condition. The
 sidecar JSON lists the target UV for every frame (bottom-left origin, matching
 STUDY_CONTRACTS) and is the gaze-proxy reference for analysis.
+
+Delivery defaults: 7680x4320, 30 fps CFR (preserves the study trajectory),
+HEVC Main, 8-bit 4:2:0, MP4/hvc1, requested 160 Mbit/s and no audio.
+Uses Apple VideoToolbox on macOS or libx265 elsewhere; an encoder failure
+never silently falls back to H.264. Actual bitrate is measured in the sidecar.
+Existing videos/sidecars are never overwritten.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from functools import lru_cache
 import hashlib
 import json
 import math
+import sys
 from pathlib import Path
 import tempfile
 from typing import Callable
@@ -29,9 +36,18 @@ import av
 import numpy as np
 
 
-def frame_count(path: Path) -> int:
-    with av.open(str(path)) as container:
-        return sum(1 for _ in container.decode(video=0))
+def frame_count(path: Path, expected_fps: Fraction | None = None, hardware: bool = False) -> int:
+    kwargs = {}
+    if hardware:
+        from av.codec.hwaccel import HWAccel
+        kwargs["hwaccel"] = HWAccel("videotoolbox", allow_software_fallback=False)
+    with av.open(str(path), **kwargs) as container:
+        count = 0
+        for frame in container.decode(video=0):
+            if expected_fps is not None and (frame.pts is None or frame.pts * frame.time_base != count / expected_fps):
+                raise ValueError("Encoded PTS does not match the exact CFR target path")
+            count += 1
+        return count
 
 
 def inspect_clip(path: Path) -> dict:
@@ -43,7 +59,11 @@ def inspect_clip(path: Path) -> dict:
     with av.open(str(path)) as container:
         video = container.streams.video[0]
         return dict(video_id="clip_" + digest.hexdigest()[:16], sha256=digest.hexdigest(),
-                    width=video.width, height=video.height, fps_rational=str(video.average_rate))
+                    width=video.width, height=video.height, fps_rational=str(video.average_rate),
+                    codec=video.codec_context.name, profile=video.codec_context.profile,
+                    pixel_format=video.codec_context.format.name,
+                    codec_tag=video.codec_context.codec_tag,
+                    measured_bitrate_bps=container.bit_rate, audio_streams=len(container.streams.audio))
 
 
 SCHEMA_VERSION = 3
@@ -245,7 +265,20 @@ def render(width: int, height: int, uv: list[float], diameter: float,
 
 
 def generate(output: Path, width: int, height: int, fps: Fraction,
-             diameter: float = TARGET_DIAMETER, crf: int = 18) -> dict:
+             diameter: float = TARGET_DIAMETER, bitrate_mbps: float = 160,
+             encoder: str = "auto", progress: Callable[[int, int], None] | None = None) -> dict:
+    if output.exists() or output.with_suffix(".path.json").exists():
+        raise FileExistsError("Output already exists; use a new filename to preserve study identities")
+    if width <= 0 or height <= 0 or width % 2 or height % 2 or width * 9 != height * 16:
+        raise ValueError("Geometry must be positive, even and 16:9")
+    if width > 7680 or not 0 < fps <= 60 or not math.isfinite(bitrate_mbps) or bitrate_mbps <= 0:
+        raise ValueError("Use at most 7680 pixels, positive fps <= 60 and positive finite bitrate")
+    if not 0 < diameter < 1:
+        raise ValueError("Target diameter must be between zero and one")
+    if encoder == "auto":
+        encoder = "hevc_videotoolbox" if sys.platform == "darwin" else "libx265"
+    if encoder not in ("hevc_videotoolbox", "libx265"):
+        raise ValueError("Use an HEVC encoder: hevc_videotoolbox or libx265")
     path = target_path(fps)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(prefix=".calibration-", suffix=".mp4",
@@ -253,21 +286,36 @@ def generate(output: Path, width: int, height: int, fps: Fraction,
         staging = Path(temporary.name)
     try:
         with av.open(str(staging), "w", options={"movflags": "+faststart"}) as container:
-            stream = container.add_stream("libx264", rate=fps)
-            stream.width, stream.height, stream.pix_fmt = width, height, "yuv420p"
-            stream.options = {"preset": "veryfast", "crf": str(crf), "bf": "0"}
+            stream = container.add_stream(encoder, rate=fps)
+            pixel_format = "nv12" if encoder == "hevc_videotoolbox" else "yuv420p"
+            stream.width, stream.height, stream.pix_fmt = width, height, pixel_format
+            stream.bit_rate = round(bitrate_mbps * 1_000_000)
+            stream.codec_context.codec_tag = "hvc1"
+            if encoder == "hevc_videotoolbox":
+                stream.options = {"profile": "main", "constant_bit_rate": "1", "allow_sw": "0", "bf": "0"}
+            else:
+                kbps = round(bitrate_mbps * 1000)
+                stream.options = {"preset": "fast", "profile": "main", "x265-params":
+                                  f"vbv-maxrate={kbps}:vbv-bufsize={kbps}:strict-cbr=1:hrd=1:bframes=0:pools=4"}
             for record in path:
                 image = render(width, height, record["uv"], diameter,
                                record["target_scale"], pulse(record["pts_s"]))
                 frame = av.VideoFrame.from_ndarray(image, format="rgb24")
-                frame = frame.reformat(format="yuv420p")
+                frame = frame.reformat(format=pixel_format)
                 frame.pts, frame.time_base = record["frame_id"], Fraction(fps.denominator, fps.numerator)
                 for packet in stream.encode(frame):
                     container.mux(packet)
+                if progress and (record["frame_id"] + 1) % 100 == 0:
+                    progress(record["frame_id"] + 1, len(path))
             for packet in stream.encode():
                 container.mux(packet)
-        if frame_count(staging) != len(path):
+        if frame_count(staging, fps, hardware=encoder == "hevc_videotoolbox") != len(path):
             raise ValueError("Encoded frame count does not match the target path")
+        encoded = inspect_clip(staging)
+        if (encoded["codec"], encoded["profile"], encoded["pixel_format"], encoded["codec_tag"]) != ("hevc", "Main", "yuv420p", "hvc1"):
+            raise ValueError("Encoded clip does not satisfy HEVC Main / 8-bit 4:2:0 / hvc1")
+        if (encoded["width"], encoded["height"], encoded["fps_rational"]) != (width, height, str(fps)):
+            raise ValueError("Calibration clip geometry/timebase mismatch")
         staging.replace(output)
         output.chmod(0o644)
     finally:
@@ -279,6 +327,9 @@ def generate(output: Path, width: int, height: int, fps: Fraction,
         schema_version=SCHEMA_VERSION, kind="patchlab_calibration_target_path",
         video_id=clip["video_id"], sha256=clip["sha256"], filename=output.name,
         width=width, height=height, fps_rational=str(fps), frame_count=len(path),
+        encoding=dict(codec=clip["codec"], profile=clip["profile"], pixel_format=clip["pixel_format"],
+                      codec_tag=clip["codec_tag"], encoder=encoder, requested_bitrate_bps=round(bitrate_mbps * 1_000_000),
+                      measured_bitrate_bps=clip["measured_bitrate_bps"], audio="none"),
         uv_origin="bottom_left", pixel_mapping="x=u*(width-1), y=(1-v)*(height-1)",
         target=dict(diameter_frac_width=diameter, style="glowing orb: pale blue core, white centre "
                     f"point ({CENTRE_FRAC} of core), Gaussian halo; size × target_scale per frame",
@@ -306,18 +357,21 @@ def generate(output: Path, width: int, height: int, fps: Fraction,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent
-                        / "patchlab_calibration_4k30.mp4")
-    parser.add_argument("--width", type=int, default=3840)
-    parser.add_argument("--height", type=int, default=2160)
+                        / "patchlab_calibration_8k30_hevc.mp4")
+    parser.add_argument("--width", type=int, default=7680)
+    parser.add_argument("--height", type=int, default=4320)
     parser.add_argument("--fps", type=Fraction, default=Fraction(30))
-    parser.add_argument("--crf", type=int, default=18,
-                        help="H.264 constant-rate-factor quality (lower is higher quality)")
+    parser.add_argument("--bitrate-mbps", type=float, default=160,
+                        help="Requested HEVC bitrate; actual bitrate is recorded in the sidecar")
+    parser.add_argument("--encoder", choices=("auto", "hevc_videotoolbox", "libx265"), default="auto",
+                        help="auto uses Apple hardware on macOS or libx265 elsewhere; no silent codec fallback")
     args = parser.parse_args()
-    if not 0 <= args.crf <= 51:
-        parser.error("--crf must be between 0 and 51")
-    sidecar = generate(args.output, args.width, args.height, args.fps, crf=args.crf)
+    sidecar = generate(args.output, args.width, args.height, args.fps,
+                       bitrate_mbps=args.bitrate_mbps, encoder=args.encoder,
+                       progress=lambda done, total: print(f"Encoding {done}/{total}", flush=True))
     print(f"{args.output.name}: {sidecar['frame_count']} frames, "
-          f"{float(sidecar['frame_count'] / args.fps):.2f} s, {sidecar['video_id']}")
+          f"{float(sidecar['frame_count'] / args.fps):.2f} s, {sidecar['video_id']}; "
+          f"HEVC Main/hvc1, {sidecar['encoding']['measured_bitrate_bps'] / 1_000_000:.2f} Mb/s measured")
 
 
 if __name__ == "__main__":

@@ -88,6 +88,15 @@ def prepare(directory: Path, catalog_path: Path, manifest_path: Path) -> dict:
         renditions = [dict(id="native", filename=source.name, sha256=clip["sha256"],
                            width=clip["width"], height=clip["height"],
                            fps_rational=clip["fps_rational"], frame_count=frames)]
+        local = next((r.get('local_playback') for r in by_id.get(clip['video_id'], {}).get('renditions', [])
+                      if r['id'] == 'native'), None)
+        if local:
+            local_path = directory / local['filename']
+            if (local['source_sha256'] != clip['sha256'] or not local_path.is_file()
+                    or sha256(local_path) != local['sha256']
+                    or any(local[k] != renditions[0][k] for k in ('width', 'height', 'fps_rational', 'frame_count'))):
+                raise ValueError('Stale local HEVC copy; run prepare_local_hevc again')
+            renditions[0]['local_playback'] = local
         previous = {r["id"]: r for r in by_id.get(clip["video_id"], {}).get("renditions", [])}
         for label, width, height in PROFILES:
             if width > clip["width"] or height > clip["height"]:
