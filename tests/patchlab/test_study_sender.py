@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from apps.patchlab.study_sender import StudyEngine, SilentNdiMedia, packed_uyvy_pixels
 from fractions import Fraction
@@ -20,7 +22,9 @@ class FakeMedia:
 class StudyTests(unittest.TestCase):
     def setUp(self):
         self.out=[];self.now=0
-        self.engine=StudyEngine('/tmp',self.out.append,FakeMedia,lambda:self.now)
+        directory=tempfile.TemporaryDirectory();self.addCleanup(directory.cleanup)
+        self.directory=Path(directory.name);(self.directory/'test.mp4').write_bytes(b'fixture')
+        self.engine=StudyEngine(self.directory,self.out.append,FakeMedia,lambda:self.now)
         self.inspection=patch('apps.patchlab.study_sender.inspect_clip',return_value=CLIP)
         self.inspection.start();self.addCleanup(self.inspection.stop)
     def command(self,phase,id=None,trial=TRIAL):
@@ -46,6 +50,7 @@ class StudyTests(unittest.TestCase):
     def test_selected_2k_rendition_is_sent_without_changing_source_identity(self):
         rendition=dict(mode='ndi',resolution='2k',filename='_renditions/clip_test/2k.mp4',
                        sha256='1'*64,width=2048,height=1152,fps_rational='25')
+        target=self.directory/rendition['filename'];target.parent.mkdir(parents=True);target.write_bytes(b'2k fixture')
         with patch('apps.patchlab.study_sender.inspect_clip',return_value={**CLIP,**rendition, 'has_audio':False}):
             self.command('prepare',trial={**TRIAL,'media':rendition})
             self.assertEqual(self.out[-1]['status'],'completed')
@@ -61,6 +66,28 @@ class StudyTests(unittest.TestCase):
     def test_abort_closes_sender_and_late_play_cannot_restart(self):
         self.command('prepare');media=self.engine.media;self.command('abort');self.command('prime')
         self.assertTrue(media.closed);self.assertEqual(self.out[-1]['status'],'failed')
+
+    def test_restarted_sender_acknowledges_terminal_cleanup_without_media_or_resume(self):
+        for phase in ('abort', 'finish', 'release'):
+            output=[]
+            factory=unittest.mock.Mock(side_effect=AssertionError('Must not open media'))
+            engine=StudyEngine('/tmp',output.append,factory)
+            engine.command(dict(version=1,type='command',command_id=phase,phase=phase,trial=TRIAL))
+            self.assertEqual(output[-1]['status'],'completed')
+            self.assertEqual(output[-1]['trial_id'],TRIAL['trial_id'])
+            factory.assert_not_called()
+            engine.command(dict(version=1,type='command',command_id='late-prime',phase='prime',trial=TRIAL))
+            self.assertEqual(output[-1]['status'],'failed')
+            factory.assert_not_called()
+
+    def test_failed_prepare_retains_new_identity_for_operator_discard(self):
+        self.command('prepare');self.command('abort')
+        new_trial={**TRIAL,'trial_id':'new-trial','stream_epoch':'new-epoch','clip':{**CLIP,'sha256':'1'*64}}
+        self.command('prepare',id='new-prepare',trial=new_trial)
+        self.assertEqual(self.out[-1]['status'],'failed')
+        self.command('abort',id='discard-new',trial=new_trial)
+        self.assertEqual(self.out[-1]['status'],'completed')
+        self.assertEqual(self.out[-1]['trial_id'],'new-trial')
 
     def test_first_frame_is_held_until_unity_confirms_capture(self):
         self.command('prepare');media=self.engine.media

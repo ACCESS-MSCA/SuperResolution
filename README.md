@@ -1,5 +1,18 @@
 # SuperResolution · ACCESS media services
 
+## 16 October 2026 · calibration visual candidate
+
+`apps.patchlab.calibration_clip` supports `--visual-version smooth-v2` (default)
+and `legacy`. Smooth-v2 composites background/halo in float32, then applies one
+8-bit quantization with stationary high-pass dither; target path/PTS/FPS/diameter
+stay unchanged. HEVC Main / hvc1 / 8-bit 4:2:0 contract is unchanged. Existing
+outputs are never overwritten. Full1080p A/B candidates and8K stills were generated
+for approval; the active study catalog/master has NOT been replaced.
+`tools/patchlab_visual_review_r100.py` reproduces the review assets. Approval and
+native8K/Local/NDI visual acceptance remain open; do not claim universal banding
+removal from an RGB still or a1080p encode. Player export reduction and persistent
+AVP media live in the sibling ACCESS repo, not in the NDI sender's integrity cache.
+
 Python services used by ACCESS for full-bandwidth NDI streaming and controlled
 Patchlab playback. The repository has two explicit applications over one shared
 NDI package; runtime data and source media are no longer mixed with code.

@@ -13,6 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import sys
 
 import av
 
@@ -31,8 +32,16 @@ def sha256(path: Path) -> str:
 
 
 def frame_count(path: Path) -> int:
-    with av.open(str(path)) as container:
+    with av.open(str(path), **decode_options(path)) as container:
         return sum(1 for _ in container.decode(video=0))
+
+def decode_options(path: Path) -> dict:
+    with av.open(str(path)) as probe:
+        hevc=probe.streams.video[0].codec_context.name=="hevc"
+    if sys.platform=="darwin" and hevc:
+        from av.codec.hwaccel import HWAccel
+        return {"hwaccel":HWAccel("videotoolbox",allow_software_fallback=False)}
+    return {}
 
 
 def transcode(source: Path, destination: Path, width: int, height: int,
@@ -43,14 +52,17 @@ def transcode(source: Path, destination: Path, width: int, height: int,
                                  dir=destination.parent, delete=False) as temporary:
         staging = Path(temporary.name)
     try:
-        with av.open(str(source)) as input_media, av.open(str(staging), "w", options={"movflags": "+faststart"}) as output:
-            encoder = output.add_stream("libx264", rate=fps)
+        with av.open(str(source),**decode_options(source)) as input_media, av.open(str(staging), "w", options={"movflags": "+faststart"}) as output:
+            hardware=sys.platform=="darwin"
+            encoder = output.add_stream("hevc_videotoolbox" if hardware else "libx265", rate=fps)
             encoder.width, encoder.height = width, height
-            encoder.pix_fmt = "yuv420p"
-            encoder.options = {"preset": "veryfast", "crf": "18", "bf": "0"}
+            encoder.pix_fmt = "nv12" if hardware else "yuv420p"
+            encoder.bit_rate = 16_000_000 if width==2048 else 12_000_000
+            encoder.codec_context.codec_tag="hvc1"
+            encoder.options = {"constant_bit_rate":"1","allow_sw":"0","realtime":"0","profile":"main","bf":"0"} if hardware else {"preset":"fast","profile":"main","x265-params":"bframes=0:pools=4"}
             count = 0
             for frame in input_media.decode(video=0):
-                scaled = frame.reformat(width=width, height=height, format="yuv420p")
+                scaled = frame.reformat(width=width, height=height, format=encoder.pix_fmt)
                 scaled.pts = count
                 scaled.time_base = Fraction(fps.denominator, fps.numerator)
                 for packet in encoder.encode(scaled):

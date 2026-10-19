@@ -242,9 +242,11 @@ def background(width: int, height: int) -> np.ndarray:
 
 
 def render(width: int, height: int, uv: list[float], diameter: float,
-           scale: float = 1.0, glow: float = 1.0) -> np.ndarray:
+           scale: float = 1.0, glow: float = 1.0, visual_version: str = "smooth-v2") -> np.ndarray:
     """Glowing orb (halo, core, white centre point), anti-aliased, on the gradient."""
-    frame = background(width, height).copy()
+    if visual_version not in ("legacy", "smooth-v2"):
+        raise ValueError("Unknown visual version")
+    frame = (background(width, height) if visual_version == "legacy" else smooth_background(width, height)).copy()
     cx, cy = uv[0] * (width - 1), (1.0 - uv[1]) * (height - 1)
     radius = diameter * width / 2 * scale
     reach = radius * GLOW_EXTENT
@@ -260,13 +262,44 @@ def render(width: int, height: int, uv: list[float], diameter: float,
     )
     for colour, alpha in layers:
         patch = patch * (1.0 - alpha) + np.array(colour, float) * alpha
-    frame[y0:y1, x0:x1] = np.round(patch).astype(np.uint8)
-    return frame
+    frame[y0:y1, x0:x1] = patch if visual_version == "smooth-v2" else np.round(patch).astype(np.uint8)
+    if visual_version == "legacy":
+        return frame
+    # One quantization AFTER all compositing. Stationary high-frequency dither
+    # prevents coherent contours without adding a moving distractor or changing
+    # the scientific trajectory. Keep the HEVC Main 8-bit delivery contract.
+    frame += smooth_dither(width, height)
+    return np.clip(np.rint(frame), 0, 255).astype(np.uint8)
+
+
+@lru_cache(maxsize=1)
+def smooth_background(width: int, height: int) -> np.ndarray:
+    rng = np.random.default_rng(NEBULA_SEED)
+    weight = np.linspace(0, 1, height, dtype=np.float32)[:, None, None]
+    top, bottom = np.array(BACKGROUND_TOP, np.float32), np.array(BACKGROUND_BOTTOM, np.float32)
+    image = np.broadcast_to(top + (bottom-top)*weight, (height, width, 3)).copy()
+    for colour in NEBULA_RGB:
+        alpha = (NEBULA_STRENGTH*clouds(width, height, rng))[..., None].astype(np.float32)
+        image *= 1-alpha
+        image += np.array(colour, np.float32)*alpha
+    image.setflags(write=False)
+    return image
+
+
+@lru_cache(maxsize=1)
+def smooth_dither(width: int, height: int) -> np.ndarray:
+    rng = np.random.default_rng(NEBULA_SEED+100)
+    noise = rng.random((height, width, 1), dtype=np.float32)-.5
+    # High-pass triangular-like dither: no large-scale mottling, no temporal noise.
+    noise = (noise-np.roll(noise, 1, axis=1))*.8
+    noise.setflags(write=False)
+    return noise
 
 
 def generate(output: Path, width: int, height: int, fps: Fraction,
              diameter: float = TARGET_DIAMETER, bitrate_mbps: float = 160,
-             encoder: str = "auto", progress: Callable[[int, int], None] | None = None) -> dict:
+             encoder: str = "auto", progress: Callable[[int, int], None] | None = None,
+             visual_version: str = "smooth-v2") -> dict:
     if output.exists() or output.with_suffix(".path.json").exists():
         raise FileExistsError("Output already exists; use a new filename to preserve study identities")
     if width <= 0 or height <= 0 or width % 2 or height % 2 or width * 9 != height * 16:
@@ -299,7 +332,7 @@ def generate(output: Path, width: int, height: int, fps: Fraction,
                                   f"vbv-maxrate={kbps}:vbv-bufsize={kbps}:strict-cbr=1:hrd=1:bframes=0:pools=4"}
             for record in path:
                 image = render(width, height, record["uv"], diameter,
-                               record["target_scale"], pulse(record["pts_s"]))
+                               record["target_scale"], pulse(record["pts_s"]), visual_version)
                 frame = av.VideoFrame.from_ndarray(image, format="rgb24")
                 frame = frame.reformat(format=pixel_format)
                 frame.pts, frame.time_base = record["frame_id"], Fraction(fps.denominator, fps.numerator)
@@ -325,6 +358,7 @@ def generate(output: Path, width: int, height: int, fps: Fraction,
         raise ValueError("Calibration clip geometry/timebase mismatch")
     sidecar = dict(
         schema_version=SCHEMA_VERSION, kind="patchlab_calibration_target_path",
+        visual_version=visual_version,
         video_id=clip["video_id"], sha256=clip["sha256"], filename=output.name,
         width=width, height=height, fps_rational=str(fps), frame_count=len(path),
         encoding=dict(codec=clip["codec"], profile=clip["profile"], pixel_format=clip["pixel_format"],
@@ -365,9 +399,12 @@ def main() -> None:
                         help="Requested HEVC bitrate; actual bitrate is recorded in the sidecar")
     parser.add_argument("--encoder", choices=("auto", "hevc_videotoolbox", "libx265"), default="auto",
                         help="auto uses Apple hardware on macOS or libx265 elsewhere; no silent codec fallback")
+    parser.add_argument("--visual-version", choices=("legacy", "smooth-v2"), default="smooth-v2",
+                        help="smooth-v2 composites in float32 and quantizes once with stationary high-pass dither; trajectory unchanged")
     args = parser.parse_args()
     sidecar = generate(args.output, args.width, args.height, args.fps,
                        bitrate_mbps=args.bitrate_mbps, encoder=args.encoder,
+                       visual_version=args.visual_version,
                        progress=lambda done, total: print(f"Encoding {done}/{total}", flush=True))
     print(f"{args.output.name}: {sidecar['frame_count']} frames, "
           f"{float(sidecar['frame_count'] / args.fps):.2f} s, {sidecar['video_id']}; "

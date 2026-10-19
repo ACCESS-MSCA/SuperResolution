@@ -12,13 +12,18 @@ def inspect_clip(path):
     with path.open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(block)
+    return {**inspect_clip_metadata(path), 'video_id':'clip_' + digest.hexdigest()[:16], 'sha256':digest.hexdigest()}
+
+
+def inspect_clip_metadata(path):
+    """Metadata only; callers must separately establish content integrity."""
+    path = Path(path)
     with av.open(str(path)) as container:
         if not container.streams.video:
             raise ValueError(f'No video stream: {path.name}')
         video = container.streams.video[0]
         duration = float(video.duration * video.time_base) if video.duration is not None else container.duration / av.time_base
-        return dict(video_id='clip_' + digest.hexdigest()[:16], sha256=digest.hexdigest(),
-                    filename=path.name, width=video.width, height=video.height,
+        return dict(filename=path.name, width=video.width, height=video.height,
                     fps=float(video.average_rate), fps_rational=str(video.average_rate),
                     duration_s=duration, has_audio=bool(container.streams.audio),
                     projection='planar', playback='once', condition='unassigned',

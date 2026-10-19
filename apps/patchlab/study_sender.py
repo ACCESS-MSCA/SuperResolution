@@ -6,14 +6,77 @@ import json
 import os
 from pathlib import Path
 import queue
+import sys
 import time
 from xml.etree.ElementTree import Element, tostring
 import numpy as np
 
-from .study_catalog import inspect_clip
+from .study_catalog import inspect_clip, inspect_clip_metadata
+from .prepare_renditions import decode_options
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def file_signature(path):
+    info = path.stat()
+    if not path.is_file():
+        raise ValueError('Clip is not a regular file')
+    return dict(dev=str(info.st_dev), ino=str(info.st_ino), size=str(info.st_size),
+                mtimeNs=str(info.st_mtime_ns), ctimeNs=str(info.st_ctime_ns))
+
+
+class VerifiedClipCache:
+    """Process-local integrity results; changes force a fresh full SHA check.
+
+    Startup attestations come only from the authenticated local coordinator,
+    which hashed these same files before binding the station. They are accepted
+    only when device/inode/size/nanosecond mtime+ctime still match on this Mac.
+    Nothing is persisted or inferred from the filename/catalog alone.
+    """
+    def __init__(self, directory):
+        self.directory = Path(directory).resolve()
+        self.entries = {}
+
+    def path(self, filename):
+        path = (self.directory / filename).resolve()
+        if not path.is_relative_to(self.directory) or path == self.directory:
+            raise ValueError('Clip outside catalog directory')
+        return path
+
+    def inspect(self, path):
+        path = self.path(path)
+        before = file_signature(path)
+        entry = self.entries.get(path)
+        if entry and entry[0] == before:
+            return dict(entry[1]), True
+        self.entries.pop(path, None)
+        actual = inspect_clip(path)
+        if file_signature(path) != before:
+            raise ValueError('Clip changed during integrity verification')
+        self.entries[path] = (before, dict(actual))
+        return actual, False
+
+    def seed(self, verified):
+        loaded = 0
+        for item in verified:
+            path = self.path(item['filename'])
+            try:
+                before = file_signature(path)
+            except (OSError, ValueError):
+                continue  # A missing/replaced file will fail a later prepare safely.
+            digest = item.get('sha256', '')
+            if before != item.get('file_signature') or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+                continue  # Changed/stale attestations never bypass hashing.
+            try:
+                actual = {**inspect_clip_metadata(path), 'sha256':digest, 'video_id':'clip_' + digest[:16]}
+            except (OSError, ValueError):
+                continue
+            if file_signature(path) != before:
+                continue
+            self.entries[path] = (before, actual)
+            loaded += 1
+        return loaded
 
 
 def packed_uyvy_pixels(frame):
@@ -44,6 +107,7 @@ class StudyEngine:
         self.hold_until = self.next_hold = 0.0
         self.next_telemetry = 0.0
         self.content_frames_sent = 0
+        self.verified_clips = VerifiedClipCache(self.directory)
 
     def identity(self):
         return {k: self.trial[k] for k in ('trial_id', 'stream_epoch')}
@@ -59,14 +123,16 @@ class StudyEngine:
             if phase == 'prepare':
                 if self.state not in ('Idle', 'Completed', 'Aborted'):
                     raise ValueError('Previous trial is not closed')
+                # A failed prepare must still retain the exact attempted identity
+                # so an explicit discard can stop/acknowledge that attempt.
+                self.trial = incoming
                 clip = incoming['clip']
                 rendition = incoming.get('media') or clip
                 if rendition.get('mode', 'ndi') != 'ndi':
                     raise ValueError('The NDI sender only accepts NDI trials')
-                path = (self.directory / rendition['filename']).resolve()
-                if not path.is_relative_to(self.directory) or path == self.directory:
-                    raise ValueError('Clip outside catalog directory')
-                actual = inspect_clip(path)
+                path = self.verified_clips.path(rendition['filename'])
+                started = time.monotonic()
+                actual, cached = self.verified_clips.inspect(path)
                 for field in ('sha256', 'width', 'height', 'fps_rational'):
                     if actual[field] != rendition[field]:
                         raise ValueError('Rendition does not match selected file')
@@ -74,7 +140,6 @@ class StudyEngine:
                     raise ValueError('Catalog does not match original file')
                 if actual['has_audio']:
                     raise ValueError('This study adapter currently supports the supplied silent clips only')
-                self.trial = incoming
                 self.media = self.media_factory(path, actual)
                 self.next_frame = self.media.next_frame()
                 if self.next_frame is None:
@@ -86,7 +151,14 @@ class StudyEngine:
                 self.state = 'Ready'
                 self.send_frame(self.first_frame, terminal_hold=True)
                 self.next_hold = self.clock() + 1.0 / float(Fraction(self.trial['clip']['fps_rational']))
+                print(f'[PATCHLAB PREPARE] ready seconds={time.monotonic()-started:.3f} integrity={"cached" if cached else "full_sha256"}', file=sys.stderr, flush=True)
             else:
+                if phase in ('release', 'finish', 'abort') and self.trial is None and self.media is None and self.state == 'Idle':
+                    if not incoming or not incoming.get('trial_id') or not incoming.get('stream_epoch'):
+                        raise ValueError('Missing terminal command identity')
+                    # A restarted process owns no source. Acknowledge cleanup,
+                    # never prepare, prime, decode or resume the interrupted clip.
+                    self.trial = incoming
                 if not incoming or not self.trial or any(incoming[k] != self.trial[k] for k in ('trial_id','stream_epoch')):
                     raise ValueError('Stale trial or epoch')
                 if phase == 'prime' and self.state == 'Ready':
@@ -194,7 +266,9 @@ class SilentNdiMedia:
     def __init__(self, path, clip):
         import av
         from packages.ndi.native import NativeNdiSender
-        self.container = av.open(str(path))
+        # HEVC delivery masters use VideoToolbox on macOS. Refuse a silent
+        # software fallback that could make a correct 8K stream appear stalled.
+        self.container = av.open(str(path), **decode_options(path))
         self.sender = None
         try:
             self.frames = iter(self.container.decode(video=0))
@@ -244,16 +318,31 @@ def main():
         try:
             msg = json.loads(raw)
             if msg.get('type') == 'command': commands.put_nowait(msg)
+            elif msg.get('type') == 'state' and 'verified_media' in msg:
+                commands.put_nowait(dict(type='verified_library', files=msg['verified_media']))
             elif msg.get('type') == 'error': disconnected.set(); sock.close()
         except Exception:
             disconnected.set(); sock.close()
+    def closed(_sock, code, _reason):
+        print(f'[PATCHLAB TRANSPORT] closed code={code}', file=sys.stderr, flush=True)
+        disconnected.set()
+    def failed(_sock, error):
+        # Exception class only: never credentials or message/header payloads.
+        print(f'[PATCHLAB TRANSPORT] error={type(error).__name__}', file=sys.stderr, flush=True)
+        disconnected.set()
     ws = websocket.WebSocketApp(args.coordinator, on_open=opened, on_message=message,
-        on_close=lambda *_: disconnected.set(), on_error=lambda *_: disconnected.set())
+        on_close=closed, on_error=failed)
     network = threading.Thread(target=lambda:ws.run_forever(suppress_origin=True,ping_interval=5,ping_timeout=3), daemon=True)
     network.start()
     try:
         while not disconnected.is_set():
-            try: engine.command(commands.get(timeout=0.002))
+            try:
+                item = commands.get(timeout=0.002)
+                if item.get('type') == 'verified_library':
+                    count = engine.verified_clips.seed(item['files'])
+                    print(f'[PATCHLAB LIBRARY] Reused {count} startup integrity checks', file=sys.stderr, flush=True)
+                else:
+                    engine.command(item)
             except queue.Empty: pass
             engine.tick()
     except KeyboardInterrupt: pass
