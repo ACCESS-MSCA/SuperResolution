@@ -1,5 +1,37 @@
 # SuperResolution · ACCESS media services
 
+## 19 October 2026 · isolated native Study transport check
+
+The opt-in `tests.patchlab.test_native_study_loopback` exercises the **real**
+HEVC decoder, `StudyEngine` frame-zero preroll/prime/advance/final-tail/release,
+NV12 asynchronous sender and native NDI Fastest receiver. It uses a generated
+320×180 six-frame fixture and unique private discovery group/source; it never
+advertises `ACCESS_PATCHLAB` or contacts an AVP/coordinator. Two runs received
+all six ordered content frame identities and exact PTS/trial/epoch metadata;
+the Mac receiver returned UYVY with NDI SDK 6.3.2.0. This closes a mocked-test gap,
+**not** headset/network acceptance or a diagnosis of the current zero-frame AVP
+incident. Production names/groups and NV12 remain unchanged. Run explicitly:
+
+```bash
+ACCESS_NDI_NATIVE_QA=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest \
+  tests.patchlab.test_native_study_loopback -v
+```
+
+## 19 October 2026 · Study sender r110
+
+The silent Patchlab sender now packs NV12 and uses a bounded six-frame ordered
+decode/packing producer. The media worker retains NDI submission/PTS/frame IDs;
+only the producer touches/finalizes the decoder. EOF, cancellation and decode
+errors remain distinct. Masters and experimental conditions are unchanged.
+The original serial UYVY preparation measured 33.463 ms/frame on the 8K30 clip,
+versus 26.695 ms for NV12 (100 frames, decode + packing only). This identifies a
+host-side budget constraint; it does **not** certify end-to-end 30 FPS on AVP.
+Device cadence, underruns and observer-on/off priority still require acceptance.
+Preproduction raw/exports were copied and SHA-verified to
+`/Volumes/SamsungT9/Noware/ACCESS_Content/StudyArchives/20261019_Preproduction_r110`,
+then originals retained under that private archive's `originals/` directory. Active
+folders are empty by explicit user request, not erased or repaired raw data.
+
 ## 16 October 2026 · calibration visual candidate
 
 `apps.patchlab.calibration_clip` supports `--visual-version smooth-v2` (default)

@@ -8,6 +8,7 @@ from pathlib import Path
 import queue
 import sys
 import time
+import threading
 from xml.etree.ElementTree import Element, tostring
 import numpy as np
 
@@ -91,8 +92,69 @@ def packed_uyvy_pixels(frame):
     return np.ascontiguousarray(rows[:, :packed.width * 2], dtype=np.uint8)
 
 
+def packed_nv12_pixels(frame):
+    """Preserve decoder Y/UV samples; strip only row padding (no 8K 422 convert)."""
+    packed = frame if frame.format.name == 'nv12' else frame.reformat(format='nv12')
+    width, height = packed.width, packed.height
+    output = np.empty((height + height // 2, width), dtype=np.uint8)
+    for plane, rows, start in ((packed.planes[0], height, 0), (packed.planes[1], height // 2, height)):
+        source = np.frombuffer(plane, dtype=np.uint8).reshape(rows, plane.line_size)
+        output[start:start + rows] = source[:, :width]
+    return output
+
+
+class FramePrefetch:
+    """Bounded lossless decode queue. EOF/errors ordered after all real frames.
+
+    The producer owns its decoder, including finalization. Cancellation never
+    closes a PyAV container concurrently with decode and never drops study frames.
+    """
+    def __init__(self, iterator, close, capacity=6):
+        self.queue = queue.Queue(maxsize=capacity)
+        self.stop = threading.Event()
+        self.iterator, self.finalize = iterator, close
+        self.thread = threading.Thread(target=self.run, daemon=True, name='Patchlab video prefetch')
+        self.thread.start()
+
+    def put(self, item):
+        while not self.stop.is_set():
+            try:
+                self.queue.put(item, timeout=.1)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def run(self):
+        try:
+            for frame in self.iterator:
+                if not self.put((frame, None)):
+                    return
+            self.put((None, None))
+        except Exception as exc:
+            self.put((None, exc))
+        finally:
+            self.finalize()
+
+    def next(self):
+        if self.stop.is_set():
+            raise RuntimeError('Prefetch stopped')
+        frame, error = self.queue.get(timeout=10)
+        if error is not None:
+            raise error
+        return frame
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=2)
+
+
 class StudyEngine:
-    """All media calls occur on one worker thread; control callbacks only enqueue."""
+    """Control callbacks enqueue; the media worker submits ordered frames.
+
+    SilentNdiMedia delegates decode/packing to its bounded prefetch owner. Only
+    that producer touches the decoder; the media worker owns NDI submission.
+    """
     def __init__(self, directory, emit, media_factory=None, clock=time.monotonic):
         self.directory = Path(directory).resolve()
         self.emit, self.clock = emit, clock
@@ -253,6 +315,7 @@ class StudyEngine:
                        video_id=clip.get('video_id'),
                        media_mode=self.trial.get('media', {}).get('mode', 'ndi'),
                        resolution=self.trial.get('media', {}).get('resolution', 'native'))
+        payload.update(getattr(self.media, 'stats', {}))
         if self.trial: payload.update(self.identity())
         self.emit(dict(version=1, type='telemetry', payload=payload))
 
@@ -263,40 +326,56 @@ class StudyEngine:
 
 
 class SilentNdiMedia:
-    def __init__(self, path, clip):
+    def __init__(self, path, clip, *, ndi_name='ACCESS_PATCHLAB', ndi_groups=''):
         import av
         from packages.ndi.native import NativeNdiSender
         # HEVC delivery masters use VideoToolbox on macOS. Refuse a silent
         # software fallback that could make a correct 8K stream appear stalled.
         self.container = av.open(str(path), **decode_options(path))
         self.sender = None
+        self.prefetch = None
+        self.stats = dict(sender_pixel_format='nv12', sender_prefetch_capacity=6,
+                          sender_decode_pack_ms=0, sender_submit_ms=0)
         try:
             self.frames = iter(self.container.decode(video=0))
             self.index, self.first_pts = 0, None
-            self.sender = NativeNdiSender('ACCESS_PATCHLAB', clip['width'], clip['height'],
-                Fraction(clip['fps_rational']), clock_video=False, video_pixel_format='uyvy422')
+            self.sender = NativeNdiSender(ndi_name, clip['width'], clip['height'],
+                Fraction(clip['fps_rational']), ndi_groups=ndi_groups, clock_video=False, video_pixel_format='nv12')
             self.sender.open()
+            self.prefetch = FramePrefetch(self.decoded_frames(), self.container.close)
         except Exception:
             self.close(); raise
 
     def next_frame(self):
-        frame = next(self.frames, None)
-        if frame is None: return None
-        if frame.pts is None or frame.time_base is None: raise ValueError('Missing source frame PTS')
-        pts = float(frame.pts * frame.time_base)
-        if self.first_pts is None: self.first_pts = pts
-        result = dict(frame_id=self.index, pts_s=pts-self.first_pts,
-                      pixels=packed_uyvy_pixels(frame))
-        self.index += 1
-        return result
+        return self.prefetch.next()
+
+    def decoded_frames(self):
+        while True:
+            started = time.perf_counter()
+            frame = next(self.frames, None)
+            if frame is None:
+                return
+            if frame.pts is None or frame.time_base is None:
+                raise ValueError('Missing source frame PTS')
+            pts = float(frame.pts * frame.time_base)
+            if self.first_pts is None:
+                self.first_pts = pts
+            result = dict(frame_id=self.index, pts_s=pts-self.first_pts, pixels=packed_nv12_pixels(frame))
+            self.stats['sender_decode_pack_ms'] = (time.perf_counter() - started) * 1000
+            self.index += 1
+            yield result
 
     def send(self, frame, metadata):
+        started = time.perf_counter()
         self.sender.set_video_metadata(metadata)
         self.sender.write_video(frame['pixels'])
+        self.stats['sender_submit_ms'] = (time.perf_counter() - started) * 1000
+        self.stats['sender_prefetch_ready'] = self.prefetch.queue.qsize()
 
     def close(self):
         if self.sender: self.sender.close()
-        self.container.close()
+        if self.prefetch: self.prefetch.close()
+        else: self.container.close()
 
 
 def main():

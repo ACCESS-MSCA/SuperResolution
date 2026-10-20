@@ -12,19 +12,20 @@ class HevcSenderMediaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory,patch('apps.patchlab.calibration_clip.target_path',return_value=target_path(Fraction(25))[:6]):
             source=Path(directory)/'clip.mp4';generate(source,320,180,Fraction(25),encoder='libx265',bitrate_mbps=1)
             clip=inspect_clip(source)
-            # Exercise the actual HEVC decoder and UYVY packing, but never
+            # Exercise the actual HEVC decoder and NV12 packing, but never
             # advertise a source or interfere with the live headset stream.
             with patch('packages.ndi.native.NativeNdiSender') as native:
                 media=SilentNdiMedia(source,clip)
                 try:
                     rows=[]
                     while (frame:=media.next_frame()) is not None:
-                        self.assertEqual(frame['pixels'].shape,(180,640))
+                        self.assertEqual(frame['pixels'].shape,(270,320))
                         self.assertTrue(frame['pixels'].flags.c_contiguous)
                         media.send(frame,'<access_study_frame />');rows.append(frame)
                     self.assertEqual([r['frame_id'] for r in rows],list(range(6)))
                     for i,row in enumerate(rows):self.assertAlmostEqual(row['pts_s'],i/25)
                     self.assertEqual(native.return_value.write_video.call_count,6)
+                    self.assertEqual(native.call_args.kwargs['video_pixel_format'],'nv12')
                 finally:media.close()
                 native.return_value.close.assert_called_once()
 

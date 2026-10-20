@@ -70,6 +70,8 @@ class NDIlib_metadata_frame_t(ctypes.Structure):
 
 class _NdiRuntime:
     def __init__(self) -> None:
+        from .configuration import prepare_environment
+        self.configuration = prepare_environment()
         self.lib = self._load_lib()
         self._configure_api()
         ok = bool(self.lib.NDIlib_initialize())

@@ -156,11 +156,12 @@ class PackedVideoTests(unittest.TestCase):
         source=av.VideoFrame.from_ndarray(np.zeros((6,18,3),dtype=np.uint8),format='rgb24')
         source.pts=12;source.time_base=Fraction(1,30)
         media=SilentNdiMedia.__new__(SilentNdiMedia)
-        media.frames=iter([source]);media.index=0;media.first_pts=None
-        result=media.next_frame()
+        media.frames=iter([source]);media.index=0;media.first_pts=None;media.stats={}
+        frames=media.decoded_frames()
+        result=next(frames)
         self.assertEqual(result['frame_id'],0)
         self.assertEqual(result['pts_s'],0)
-        self.assertEqual(result['pixels'].shape,(6,36))
-        self.assertIsNone(media.next_frame())
+        self.assertEqual(result['pixels'].shape,(9,18))
+        self.assertIsNone(next(frames,None))
 
 if __name__=='__main__': unittest.main()
